@@ -1,0 +1,26 @@
+campaign:
+  categories:
+    - beauty
+    - pet
+    - home
+    - supplements
+  daily_discovery_limit: 50
+  daily_draft_limit: 10
+  minimum_score_for_draft: 75
+  minimum_score_for_auto_send: 90
+
+sender:
+  name: Zaigham Ali
+  website: https://zaighamali.com
+  linkedin: https://linkedin.com/zaighamali-
+  offer: We take the messy, time-consuming operational work off your plate and keep your Amazon account clean, compliant, and conversion-ready.
+
+storage:
+  sqlite_path: data/leads.db
+  google_sheet_id: REPLACE_ME
+
+llm:
+  provider: minimax
+
+gmail:
+  drafts_only: true
