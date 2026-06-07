@@ -2,8 +2,11 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from types import SimpleNamespace
+import sys
 
 from amazon_lead_agent.agents.extraction_agent import run_extraction
+from amazon_lead_agent.tools.scrapegraph_runner import extract_brand_profile
 from amazon_lead_agent.tools.sqlite_store import get_connection, init_db, upsert_lead
 
 
@@ -45,7 +48,78 @@ class ExtractionMethodTests(unittest.TestCase):
             finally:
                 conn.close()
 
+    @patch("amazon_lead_agent.tools.scrapegraph_runner._build_snapshot")
+    def test_scrapegraph_success_is_labeled_other(self, mock_snapshot) -> None:
+        mock_snapshot.return_value = {
+            "url": "https://example.com",
+            "html": "<html></html>",
+            "text": "Example text",
+            "links": [],
+            "amazon_links": [],
+            "contact_links": [],
+            "public_emails": [],
+            "blocked": False,
+            "title": "Example Brand",
+            "source_urls": ["https://example.com"],
+        }
+
+        class FakeSmartScraperGraph:
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+
+            def run(self):
+                return {
+                    "company_name": "Example Brand",
+                    "brand_name": "Example Brand",
+                    "website": "https://example.com",
+                    "source_urls": ["https://example.com"],
+                }
+
+        fake_module = SimpleNamespace(SmartScraperGraph=FakeSmartScraperGraph)
+        with patch.dict(sys.modules, {"scrapegraphai": SimpleNamespace(graphs=fake_module), "scrapegraphai.graphs": fake_module}):
+            profile = extract_brand_profile("https://example.com", minimax_api_key="test")
+
+        self.assertEqual(profile["extraction_method"], "scrapegraphai_other")
+        self.assertEqual(profile["company_name"], "Example Brand")
+
+    @patch("amazon_lead_agent.tools.scrapegraph_runner._build_snapshot")
+    def test_router_gemini_success_is_labeled_gemini_direct(self, mock_snapshot) -> None:
+        mock_snapshot.return_value = {
+            "url": "https://example.com",
+            "html": "<html></html>",
+            "text": "Example text",
+            "links": [],
+            "amazon_links": [],
+            "contact_links": [],
+            "public_emails": [],
+            "blocked": False,
+            "title": "Example Brand",
+            "source_urls": ["https://example.com"],
+        }
+
+        class FakeRouter:
+            last_used_provider = "gemini"
+            last_used_model = "gemini-2.5-flash"
+
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+
+            def generate_json(self, prompt, purpose="extraction"):
+                return {
+                    "company_name": "Example Brand",
+                    "brand_name": "Example Brand",
+                    "website": "https://example.com",
+                    "source_urls": ["https://example.com"],
+                }
+
+        with patch("amazon_lead_agent.tools.scrapegraph_runner.LLMRouter", FakeRouter):
+            profile = extract_brand_profile("https://example.com", minimax_api_key="test")
+
+        self.assertEqual(profile["extraction_method"], "gemini_direct")
+        self.assertEqual(profile["company_name"], "Example Brand")
+
 
 if __name__ == "__main__":
     unittest.main()
-

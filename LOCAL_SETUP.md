@@ -34,6 +34,10 @@ Fill these values in `.env`:
 - `GMAIL_SENDER_EMAIL`
 - `GMAIL_CREDENTIALS_FILE`
 - `GMAIL_TOKEN_FILE`
+- `LLM_PROVIDER=minimax`
+- `LLM_FALLBACK_PROVIDERS=minimax,gemini`
+- `GEMINI_API_KEY` if you want Gemini as an optional provider
+- `OPENAI_API_KEY` only if you later add a real OpenAI API integration
 
 Use the fallback model only if the primary MiniMax-M3 request fails.
 
@@ -57,6 +61,31 @@ Default direct API settings:
 
 The direct client uses the Bearer token from `MINIMAX_API_KEY`.
 
+## Gemini setup
+
+Gemini is optional and can be used with a free-tier Gemini API key from Google AI Studio.
+
+Set:
+
+- `GEMINI_API_KEY`
+- `GEMINI_MODEL=gemini-2.5-flash`
+- `GEMINI_TIMEOUT_SECONDS=90`
+- `GEMINI_MAX_OUTPUT_TOKENS=4096`
+
+To make Gemini primary:
+
+```bash
+LLM_PROVIDER=gemini
+```
+
+To keep Gemini available as a fallback:
+
+```bash
+LLM_FALLBACK_PROVIDERS=minimax,gemini
+```
+
+Keys stay local in `.env`.
+
 ## MiniMax-M2.7 fallback setup
 
 Fallback settings:
@@ -75,15 +104,27 @@ python -c "from amazon_lead_agent.llm.minimax_client import MiniMaxClient; print
 
 If the output is not plain text, confirm `MINIMAX_API_KEY` and the API style values.
 
+## Verify Gemini extraction
+
+Run a quick direct check:
+
+```bash
+python scripts/test_llm_provider.py --provider gemini
+```
+
+If Gemini is skipped, confirm `GEMINI_API_KEY` is set and `google-genai` is installed.
+
 ## Verify ScrapeGraphAI vs fallback
 
 The extractor records `extraction_method` in SQLite.
 
 Methods you may see:
 
-- `scrapegraphai_minimax`
+- `scrapegraphai_other`
 - `minimax_direct_m3`
 - `minimax_direct_m27`
+- `gemini_direct`
+- `openai_direct`
 - `playwright_contact_scrape`
 - `urllib_fallback`
 - `heuristic_fallback`
@@ -160,4 +201,3 @@ python run_campaign.py --config config.yaml --mode score
 python run_campaign.py --config config.yaml --mode draft --dry-run
 python -m compileall amazon_lead_agent
 ```
-

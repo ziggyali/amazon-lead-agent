@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 import os
-import re
 from typing import Any
 
 import requests
+
+from amazon_lead_agent.llm.base import content_to_text, extract_json_object
 
 
 class MiniMaxError(RuntimeError):
@@ -24,58 +24,6 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
-def _content_to_text(content: Any) -> str:
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        text_blocks: list[str] = []
-        fallback_blocks: list[str] = []
-        for block in content:
-            if isinstance(block, dict):
-                block_type = str(block.get("type", "")).lower()
-                text = block.get("text") or block.get("content") or ""
-                if block_type == "text" and text:
-                    text_blocks.append(str(text))
-                elif text:
-                    fallback_blocks.append(str(text))
-            elif isinstance(block, str):
-                fallback_blocks.append(block)
-        if text_blocks:
-            return "\n".join(text_blocks)
-        if fallback_blocks:
-            return "\n".join(fallback_blocks)
-        return ""
-    if isinstance(content, dict):
-        if "text" in content:
-            return str(content["text"])
-        if "content" in content:
-            return _content_to_text(content["content"])
-    return str(content)
-
-
-def _extract_json_object(text: str) -> dict[str, Any]:
-    stripped = text.strip()
-    if not stripped:
-        raise MiniMaxError("MiniMax response was empty")
-    if stripped.startswith("```"):
-        stripped = re.sub(r"^```(?:json)?", "", stripped, flags=re.IGNORECASE).strip()
-        stripped = re.sub(r"```$", "", stripped).strip()
-    try:
-        loaded = json.loads(stripped)
-        if isinstance(loaded, dict):
-            return loaded
-    except json.JSONDecodeError:
-        pass
-    match = re.search(r"\{.*\}", stripped, flags=re.DOTALL)
-    if match:
-        loaded = json.loads(match.group(0))
-        if isinstance(loaded, dict):
-            return loaded
-    raise MiniMaxError("MiniMax response did not contain valid JSON")
-
-
 @dataclass
 class MiniMaxClient:
     api_key: str | None = None
@@ -90,6 +38,8 @@ class MiniMaxClient:
     max_tokens_research: int | None = None
     last_used_model: str | None = None
     last_used_style: str | None = None
+    last_used_provider: str | None = None
+    provider_name: str = "minimax"
 
     def __post_init__(self) -> None:
         self.api_key = self.api_key or _env("MINIMAX_API_KEY")
@@ -141,15 +91,16 @@ class MiniMaxClient:
         data = response.json()
         self.last_used_model = model
         self.last_used_style = api_style
+        self.last_used_provider = self.provider_name
         if api_style == "chatcompletion_v2":
             if isinstance(data, dict):
                 content = data.get("choices", [{}])[0].get("message", {}).get("content")
-                return _content_to_text(content)
+                return content_to_text(content)
         elif api_style == "anthropic_messages":
             if isinstance(data, dict):
                 content = data.get("content")
-                return _content_to_text(content)
-        return _content_to_text(data)
+                return content_to_text(content)
+        return content_to_text(data)
 
     def _call_with_fallback(self, prompt: str, purpose: str, max_tokens: int) -> str:
         primary_error: Exception | None = None
@@ -184,7 +135,13 @@ class MiniMaxClient:
 
     def generate_json(self, prompt: str, purpose: str = "extraction") -> dict[str, Any]:
         raw = self._call_with_fallback(prompt, purpose, self.max_tokens_research)
-        return _extract_json_object(raw)
+        try:
+            return extract_json_object(raw)
+        except ValueError as exc:
+            raise MiniMaxError(str(exc)) from exc
+
+    def available(self) -> bool:
+        return bool(self.api_key)
 
 
 def get_default_client() -> MiniMaxClient:

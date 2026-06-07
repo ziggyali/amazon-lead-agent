@@ -6,7 +6,7 @@ import os
 import re
 from urllib.parse import urljoin
 
-from amazon_lead_agent.llm.minimax_client import MiniMaxClient, MiniMaxError
+from amazon_lead_agent.llm.router import LLMRouter
 from amazon_lead_agent.prompts import load_prompt
 from amazon_lead_agent.tools.amazon_backlink_discovery import (
     contains_amazon_buying_signal,
@@ -175,13 +175,28 @@ def _scrapegraph_attempt(url: str, snapshot: dict) -> dict | None:
             parsed = result
         else:
             parsed = {"result": result}
-        return _normalize_profile(parsed, url, snapshot, "scrapegraphai_minimax")
+        # The public ScrapeGraphAI docs do not document a MiniMax provider config.
+        # Label the extraction conservatively unless an explicit, verified MiniMax
+        # integration is added later.
+        return _normalize_profile(parsed, url, snapshot, "scrapegraphai_other")
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning("ScrapeGraphAI extraction failed for %s: %s", url, exc)
         return None
 
 
-def extract_brand_profile(url: str, minimax_api_key: str | None = None) -> dict:
+def _extraction_method_for_router(router: LLMRouter) -> str:
+    provider = (router.last_used_provider or "").strip().lower()
+    model = (router.last_used_model or "").strip().lower()
+    if provider == "gemini":
+        return "gemini_direct"
+    if provider == "minimax":
+        return "minimax_direct_m27" if "2.7" in model or "m2.7" in model else "minimax_direct_m3"
+    if provider == "openai":
+        return "openai_direct"
+    return "blocked_or_error"
+
+
+def extract_brand_profile(url: str, minimax_api_key: str | None = None, llm_config: dict | None = None) -> dict:
     snapshot = _build_snapshot(url)
     if snapshot["blocked"]:
         blocked_profile = _heuristic_profile(url, snapshot)
@@ -195,14 +210,13 @@ def extract_brand_profile(url: str, minimax_api_key: str | None = None) -> dict:
         return scrapegraph_profile
 
     prompt = _build_prompt(url, snapshot)
-    client = MiniMaxClient(api_key=minimax_api_key)
+    router = LLMRouter(config={"llm": llm_config} if llm_config else None, minimax_api_key=minimax_api_key)
     try:
-        profile = client.generate_json(prompt, purpose="extraction")
-        used_model = (client.last_used_model or "").lower()
-        extraction_method = "minimax_direct_m27" if "2.7" in used_model or "m2.7" in used_model else "minimax_direct_m3"
+        profile = router.generate_json(prompt, purpose="extraction")
+        extraction_method = _extraction_method_for_router(router)
         return _normalize_profile(profile, url, snapshot, extraction_method)
-    except MiniMaxError as exc:
-        LOGGER.warning("MiniMax direct extraction failed for %s: %s", url, exc)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Direct LLM extraction failed for %s: %s", url, exc)
         if _allow_heuristic_fallback():
             profile = _heuristic_profile(url, snapshot)
             profile["extraction_method"] = "heuristic_fallback"

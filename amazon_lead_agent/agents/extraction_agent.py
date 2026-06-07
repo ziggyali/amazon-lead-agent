@@ -14,17 +14,17 @@ def run_extraction(config: dict, db_path: Path) -> list[dict]:
         minimax_key = __import__("os").environ.get("MINIMAX_API_KEY", "")
         for lead in candidates:
             try:
-                profile = extract_brand_profile(lead.get("website", ""), minimax_key)
+                profile = extract_brand_profile(lead.get("website", ""), minimax_key, config.get("llm", {}))
                 merged = {
                     **lead,
                     **profile,
                     "status": "enriched",
-                    "extraction_fallback": int(profile.get("extraction_method") != "scrapegraphai_minimax"),
+                    "extraction_fallback": int(profile.get("extraction_method") != "scrapegraphai_other"),
                     "blocked_or_error": int(profile.get("extraction_method") == "blocked_or_error"),
                 }
                 upsert_lead(conn, merged)
                 record_outreach_event(conn, {"lead_id": lead["id"], "event_type": "enriched", "metadata": profile})
-                if profile.get("extraction_method") and profile.get("extraction_method") != "scrapegraphai_minimax":
+                if profile.get("extraction_method") and profile.get("extraction_method") != "scrapegraphai_other":
                     record_outreach_event(
                         conn,
                         {

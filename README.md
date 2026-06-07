@@ -45,8 +45,12 @@ bash scripts/run_local.sh
 
 - Primary: `MiniMax-M3`
 - Fallback: `MiniMax-M2.7`
+- Optional provider: Gemini with a free-tier Gemini API key.
+- Set `LLM_PROVIDER=gemini` to make Gemini primary.
+- Set `LLM_FALLBACK_PROVIDERS=minimax,gemini` to keep both available.
 - Direct MiniMax API is supported.
 - ScrapeGraphAI is optional and used when it works locally.
+- OpenAI is optional and requires a real OpenAI API key from the OpenAI platform. ChatGPT Business alone may not include API access.
 
 See `LOCAL_SETUP.md` for exact environment variables and verification commands.
 
@@ -79,9 +83,15 @@ python run_campaign.py --config config.yaml --mode draft --dry-run
 python -m compileall amazon_lead_agent
 ```
 
+For provider smoke checks:
+
+```bash
+python scripts/test_llm_provider.py --provider minimax
+python scripts/test_llm_provider.py --provider gemini
+```
+
 ## Setup docs
 
 - `LOCAL_SETUP.md`
 - `HERMES_SETUP.md`
 - `scripts/create_google_sheet.py`
-
