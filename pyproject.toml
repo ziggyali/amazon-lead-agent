@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "amazon-lead-agent"
+version = "0.1.0"
+description = "Free-first Amazon lead discovery, enrichment, scoring, and Gmail draft automation."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "requests>=2.31",
+  "PyYAML>=6.0",
+  "google-api-python-client>=2.0",
+  "google-auth>=2.0",
+  "google-auth-oauthlib>=1.0",
+]
+
+[project.optional-dependencies]
+scrapegraphai = ["scrapegraphai"]
+dev = []
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["amazon_lead_agent*"]
+

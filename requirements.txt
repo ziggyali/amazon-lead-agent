@@ -11,5 +11,6 @@ playwright>=1.45.0
 pydantic>=2.8.2
 python-dotenv>=1.0.1
 PyYAML>=6.0.2
+requests>=2.31.0
 scrapegraphai>=1.17.0
 trafilatura>=1.12.2

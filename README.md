@@ -1,6 +1,6 @@
 # Amazon Lead Agent
 
-Automated lead discovery, enrichment, scoring, and Gmail draft creation for DTC brands that mention Amazon availability or link to Amazon storefronts.
+Automated lead discovery, enrichment, scoring, Google Sheets mirroring, and Gmail draft creation for DTC brands that mention Amazon availability or link to Amazon storefronts.
 
 ## Campaign v1
 
@@ -22,7 +22,7 @@ Automated lead discovery, enrichment, scoring, and Gmail draft creation for DTC 
 3. Uses ScrapeGraphAI to extract structured data from public brand websites.
 4. Scores leads based on Amazon evidence, contactability, ICP fit, and pain-point strength.
 5. Writes qualified leads to Google Sheets.
-6. Creates Gmail drafts for A-tier leads only.
+6. Creates Gmail drafts for qualified leads only.
 
 ## What the agent does not do
 
@@ -35,14 +35,14 @@ Automated lead discovery, enrichment, scoring, and Gmail draft creation for DTC 
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate
+.venv\Scripts\activate
 pip install -r requirements.txt
-playwright install
-cp .env.example .env
-cp config.example.yaml config.yaml
+pip install scrapegraphai
+copy .env.example .env
+copy config.example.yaml config.yaml
 ```
 
-Fill `.env` with your Minimax key and Google credentials configuration.
+Then fill in `.env` with your Minimax and Google credentials.
 
 ## Run
 
@@ -93,6 +93,10 @@ Drafts are created only when:
 - the lead has not already been drafted
 - daily draft cap has not been reached
 
-## Next implementation tasks
+## Repo layout
 
-See `IMPLEMENTATION_PLAN.md`.
+- `amazon_lead_agent/` core package
+- `prompts/` prompt templates
+- `tests/` smoke and unit tests
+- `.github/workflows/` CI and scheduled execution
+
