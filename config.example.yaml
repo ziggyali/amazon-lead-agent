@@ -21,6 +21,7 @@ storage:
 
 llm:
   provider: minimax
+  allow_heuristic_fallback: true
 
 gmail:
   drafts_only: true

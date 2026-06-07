@@ -30,6 +30,7 @@ def init_db(path: str | Path) -> None:
                 id TEXT PRIMARY KEY,
                 company_name TEXT,
                 brand_name TEXT,
+                lead_type TEXT DEFAULT 'lead',
                 normalized_company_name TEXT,
                 website TEXT,
                 normalized_domain TEXT,
@@ -48,11 +49,23 @@ def init_db(path: str | Path) -> None:
                 confidence REAL DEFAULT 0,
                 score INTEGER DEFAULT 0,
                 tier TEXT DEFAULT 'Unscored',
+                score_reason TEXT,
                 source_quotes_json TEXT DEFAULT '[]',
                 source_urls_json TEXT DEFAULT '[]',
                 primary_source_url TEXT,
                 contact_path_exists INTEGER DEFAULT 0,
                 has_email INTEGER DEFAULT 0,
+                email_status TEXT DEFAULT 'unknown',
+                send_status TEXT DEFAULT 'pending',
+                review_status TEXT DEFAULT 'pending',
+                outreach_angle TEXT,
+                draft_subject TEXT,
+                draft_body TEXT,
+                draft_preview_subject TEXT,
+                draft_preview_body TEXT,
+                extraction_method TEXT,
+                extraction_fallback INTEGER DEFAULT 0,
+                blocked_or_error INTEGER DEFAULT 0,
                 status TEXT DEFAULT 'new',
                 draft_id TEXT,
                 drafted INTEGER DEFAULT 0,
@@ -91,16 +104,58 @@ def init_db(path: str | Path) -> None:
                 discovery_count INTEGER DEFAULT 0,
                 enrichment_count INTEGER DEFAULT 0,
                 scoring_count INTEGER DEFAULT 0,
+                approved_count INTEGER DEFAULT 0,
+                rejected_count INTEGER DEFAULT 0,
                 draft_count INTEGER DEFAULT 0,
+                contact_form_queue_count INTEGER DEFAULT 0,
+                extraction_fallback_count INTEGER DEFAULT 0,
+                errors INTEGER DEFAULT 0,
                 notes TEXT,
                 created_at TEXT,
                 updated_at TEXT
             );
             """
         )
+        _ensure_columns(
+            conn,
+            "leads",
+            {
+                "lead_type": "TEXT DEFAULT 'lead'",
+                "score_reason": "TEXT",
+                "email_status": "TEXT DEFAULT 'unknown'",
+                "send_status": "TEXT DEFAULT 'pending'",
+                "review_status": "TEXT DEFAULT 'pending'",
+                "outreach_angle": "TEXT",
+                "draft_subject": "TEXT",
+                "draft_body": "TEXT",
+                "draft_preview_subject": "TEXT",
+                "draft_preview_body": "TEXT",
+                "extraction_method": "TEXT",
+                "extraction_fallback": "INTEGER DEFAULT 0",
+                "blocked_or_error": "INTEGER DEFAULT 0",
+            },
+        )
+        _ensure_columns(
+            conn,
+            "daily_reports",
+            {
+                "approved_count": "INTEGER DEFAULT 0",
+                "rejected_count": "INTEGER DEFAULT 0",
+                "contact_form_queue_count": "INTEGER DEFAULT 0",
+                "extraction_fallback_count": "INTEGER DEFAULT 0",
+                "errors": "INTEGER DEFAULT 0",
+            },
+        )
         conn.commit()
     finally:
         conn.close()
+
+
+def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    for column, ddl in columns.items():
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
 def _json_list(value: object) -> str:
@@ -114,7 +169,7 @@ def _json_list(value: object) -> str:
         return "[]"
     if isinstance(value, list):
         return json.dumps(value, ensure_ascii=False)
-    if isinstance(value, tuple | set):
+    if isinstance(value, (tuple, set)):
         return json.dumps(list(value), ensure_ascii=False)
     return json.dumps([value], ensure_ascii=False)
 
@@ -146,11 +201,24 @@ def _lead_row(lead: dict) -> dict:
         "confidence": float(lead.get("confidence") or 0),
         "score": int(lead.get("score") or 0),
         "tier": lead.get("tier", "Unscored"),
+        "score_reason": lead.get("score_reason", ""),
         "source_quotes_json": _json_list(lead.get("source_quotes", [])),
         "source_urls_json": _json_list(source_urls),
         "primary_source_url": lead.get("primary_source_url", source_urls[0] if source_urls else ""),
         "contact_path_exists": int(bool(lead.get("contact_page_url") or lead.get("public_emails"))),
         "has_email": int(bool(lead.get("public_emails"))),
+        "email_status": lead.get("email_status", "public_email" if lead.get("public_emails") else "contact_only" if lead.get("contact_page_url") else "unknown"),
+        "send_status": lead.get("send_status", "pending"),
+        "review_status": lead.get("review_status", "pending"),
+        "outreach_angle": lead.get("outreach_angle", ""),
+        "draft_subject": lead.get("draft_subject", ""),
+        "draft_body": lead.get("draft_body", ""),
+        "draft_preview_subject": lead.get("draft_preview_subject", ""),
+        "draft_preview_body": lead.get("draft_preview_body", ""),
+        "extraction_method": lead.get("extraction_method", ""),
+        "extraction_fallback": int(bool(lead.get("extraction_fallback"))),
+        "blocked_or_error": int(bool(lead.get("blocked_or_error"))),
+        "lead_type": lead.get("lead_type", "lead"),
         "status": lead.get("status", "new"),
         "draft_id": lead.get("draft_id", ""),
         "drafted": int(bool(lead.get("drafted"))),
@@ -251,7 +319,7 @@ def get_leads_for_drafting(conn: sqlite3.Connection, min_score: int, limit: int)
           AND has_email = 1
           AND contact_path_exists = 1
           AND amazon_backlink_found = 1
-          AND status IN ('scored', 'enriched')
+          AND status IN ('scored', 'enriched', 'approved')
         ORDER BY score DESC, datetime(updated_at) ASC
         LIMIT ?
         """,
@@ -298,12 +366,17 @@ def record_outreach_event(conn: sqlite3.Connection, event: dict) -> None:
         "discovered": "discovery_count",
         "enriched": "enrichment_count",
         "scored": "scoring_count",
+        "approved": "approved_count",
+        "rejected": "rejected_count",
         "draft_created": "draft_count",
+        "contact_form_queue": "contact_form_queue_count",
+        "extraction_fallback": "extraction_fallback_count",
+        "error": "errors",
     }.get(event.get("event_type"), None)
     conn.execute(
         """
-        INSERT INTO daily_reports (report_date, discovery_count, enrichment_count, scoring_count, draft_count, created_at, updated_at)
-        VALUES (?, 0, 0, 0, 0, ?, ?)
+        INSERT INTO daily_reports (report_date, discovery_count, enrichment_count, scoring_count, approved_count, rejected_count, draft_count, contact_form_queue_count, extraction_fallback_count, errors, created_at, updated_at)
+        VALUES (?, 0, 0, 0, 0, 0, 0, 0, 0, 0, ?, ?)
         ON CONFLICT(report_date) DO NOTHING
         """,
         (report_date, created_at, created_at),

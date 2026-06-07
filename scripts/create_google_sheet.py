@@ -41,13 +41,20 @@ TABS: dict[str, list[str]] = {
         "amazon_backlink_found", "decision_maker_name", "decision_maker_title",
         "decision_maker_source_url", "email_or_contact_path", "email_status",
         "source_urls", "pain_points", "lead_score", "lead_tier", "confidence",
-        "outreach_angle", "draft_subject", "draft_body", "review_status", "send_status",
+        "outreach_angle", "draft_subject", "draft_body", "draft_preview_subject",
+        "draft_preview_body", "review_status", "send_status", "extraction_method",
         "draft_created_at", "last_checked", "created_at",
     ],
     "Approved Leads": [
         "lead_id", "company_name", "website", "category", "amazon_evidence_url",
         "decision_maker_name", "email_or_contact_path", "lead_score", "lead_tier",
-        "outreach_angle", "draft_subject", "draft_body", "review_status", "send_status",
+        "outreach_angle", "draft_subject", "draft_body", "draft_preview_subject",
+        "draft_preview_body", "review_status", "send_status", "extraction_method",
+        "created_at",
+    ],
+    "Contact Form Queue": [
+        "lead_id", "company_name", "website", "category", "contact_page_url",
+        "lead_score", "lead_tier", "review_status", "send_status", "extraction_method",
         "created_at",
     ],
     "Outreach Log": [
@@ -59,8 +66,9 @@ TABS: dict[str, list[str]] = {
         "source_urls", "created_at",
     ],
     "Daily Reports": [
-        "report_date", "campaign", "discovered_count", "enriched_count", "approved_count",
-        "rejected_count", "drafts_created", "top_leads", "notes",
+        "report_date", "campaign", "discovered_count", "enriched_count", "scored_count",
+        "approved_count", "rejected_count", "drafts_created", "contact_form_queue_count",
+        "extraction_fallback_count", "errors", "top_leads", "notes",
     ],
 }
 

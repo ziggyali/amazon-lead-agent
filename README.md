@@ -1,102 +1,87 @@
 # Amazon Lead Agent
 
-Automated lead discovery, enrichment, scoring, Google Sheets mirroring, and Gmail draft creation for DTC brands that mention Amazon availability or link to Amazon storefronts.
+Local-first lead generation engine for Zaigham Ali's Amazon account management services.
 
-## Campaign v1
+It finds DTC brands in:
 
-- Target: DTC brands whose public websites mention Amazon availability or link to Amazon storefronts
-- Categories: beauty, pet, home, supplements
-- Daily discovery limit: 50
-- Gmail mode: drafts only
-- Daily draft limit: 10
-- Minimum score for draft: 75
-- Reserved auto-send threshold: 90
-- Extraction harness: ScrapeGraphAI
-- Extraction LLM: Minimax
-- Sender: Zaigham Ali
+- Beauty & Personal Care
+- Pet Supplies
+- Home & Kitchen
+- Health / Supplements
 
-## What the agent does
+It then enriches leads, stores canonical records in SQLite, mirrors results to Google Sheets, and creates Gmail drafts only for qualified leads.
 
-1. Generates safe web-search queries for DTC brands with Amazon evidence.
-2. Discovers candidate company URLs from public search results.
-3. Uses ScrapeGraphAI to extract structured data from public brand websites.
-4. Scores leads based on Amazon evidence, contactability, ICP fit, and pain-point strength.
-5. Writes qualified leads to Google Sheets.
-6. Creates Gmail drafts for qualified leads only.
+## Operating model
 
-## What the agent does not do
+- The Python repo is the lead engine.
+- Hermes Agent on the local PC is the operator and scheduler.
+- Hermes should run the local scripts and read the logs and reports.
+- Hermes should not modify code unless explicitly asked.
+- Hermes should never send emails.
+- GitHub Actions is optional and not the main runtime.
 
-- It does not bypass CAPTCHAs, login walls, robots restrictions, Amazon anti-bot systems, or LinkedIn protections.
-- It does not scrape logged-in LinkedIn pages.
-- It does not send emails automatically in v1.
-- It does not claim guessed emails are verified.
+## Quick start
 
-## Setup
+1. Copy `config.example.yaml` to `config.yaml`.
+2. Copy `.env.example` to `.env`.
+3. Run the local installer.
+4. Run the local campaign script.
 
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-pip install scrapegraphai
-copy .env.example .env
-copy config.example.yaml config.yaml
+Windows:
+
+```powershell
+scripts\install_local.ps1
+scripts\run_local.ps1
 ```
 
-Then fill in `.env` with your Minimax and Google credentials.
-
-## Run
+macOS/Linux:
 
 ```bash
-python run_campaign.py --config config.yaml --mode full
+bash scripts/install_local.sh
+bash scripts/run_local.sh
 ```
 
-Other modes:
+## LLM setup
+
+- Primary: `MiniMax-M3`
+- Fallback: `MiniMax-M2.7`
+- Direct MiniMax API is supported.
+- ScrapeGraphAI is optional and used when it works locally.
+
+See `LOCAL_SETUP.md` for exact environment variables and verification commands.
+
+## Safety rules
+
+- Drafts only, no automatic sending.
+- No LinkedIn scraping.
+- No anti-bot bypassing.
+- No CAPTCHA bypassing.
+- No login-wall bypassing.
+- No secret commits.
+
+## Reports
+
+Each run writes:
+
+- `logs/YYYY-MM-DD-HHMMSS-run.log`
+- `logs/latest.log`
+- `campaign_report.md`
+
+## Debugging
+
+Use the CLI only for troubleshooting:
 
 ```bash
 python run_campaign.py --config config.yaml --mode discover
 python run_campaign.py --config config.yaml --mode enrich
 python run_campaign.py --config config.yaml --mode score
-python run_campaign.py --config config.yaml --mode draft
+python run_campaign.py --config config.yaml --mode draft --dry-run
+python -m compileall amazon_lead_agent
 ```
 
-## Google Sheets
+## Setup docs
 
-Create a Google Sheet and add its ID to `config.yaml`. The expected tabs are:
-
-- Campaign Config
-- Lead Queue
-- Approved Leads
-- Outreach Log
-- Rejected Leads
-- Daily Reports
-
-The app can create missing headers when it first writes rows.
-
-## GitHub Actions scheduling
-
-A starter workflow is included at `.github/workflows/daily_campaign.yml`. Add required secrets before enabling scheduled runs:
-
-- `MINIMAX_API_KEY`
-- `GOOGLE_SERVICE_ACCOUNT_JSON`
-- `GMAIL_SENDER_EMAIL`
-
-For Gmail drafts, the Google account must have appropriate Gmail API access and OAuth/service delegation configured. If that is not configured yet, run locally first.
-
-## Safety gates
-
-Drafts are created only when:
-
-- lead score is at least `minimum_score_for_draft`
-- lead tier is A or B
-- there is at least one public source URL
-- there is a visible business email or contact path
-- the lead has not already been drafted
-- daily draft cap has not been reached
-
-## Repo layout
-
-- `amazon_lead_agent/` core package
-- `prompts/` prompt templates
-- `tests/` smoke and unit tests
-- `.github/workflows/` CI and scheduled execution
+- `LOCAL_SETUP.md`
+- `HERMES_SETUP.md`
+- `scripts/create_google_sheet.py`
 

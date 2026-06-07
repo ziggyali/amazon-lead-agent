@@ -99,16 +99,63 @@ def score_lead(lead: dict) -> dict:
     }
 
 
+def classify_scored_lead(lead: dict, min_score_for_draft: int) -> dict:
+    score = int(lead.get("score") or 0)
+    has_email = bool((lead.get("public_emails") or []))
+    has_contact_page = bool(lead.get("contact_page_url"))
+    if score >= min_score_for_draft and has_email and lead.get("tier") in {"A", "B"}:
+        return {
+            "status": "approved",
+            "review_status": "approved",
+            "send_status": "pending",
+            "email_status": "public_email",
+            "lead_type": "lead",
+        }
+    if score >= min_score_for_draft and has_contact_page and not has_email:
+        return {
+            "status": "contact_form_queue",
+            "review_status": "needs_contact_form",
+            "send_status": "contact_form_queue",
+            "email_status": "contact_form_only",
+            "lead_type": "contact_form_queue",
+        }
+    if lead.get("tier") == "Reject" or score < min_score_for_draft:
+        return {
+            "status": "rejected",
+            "review_status": "rejected",
+            "send_status": "not_eligible",
+            "email_status": "unknown",
+            "lead_type": "lead",
+        }
+    return {
+        "status": "scored",
+        "review_status": "needs_review",
+        "send_status": "pending",
+        "email_status": "unknown",
+        "lead_type": "lead",
+    }
+
+
 def run_scoring(config: dict, db_path: Path) -> list[dict]:
     conn = get_connection(db_path)
     scored: list[dict] = []
     try:
         leads = get_leads_for_scoring(conn, int(config["campaign"]["daily_discovery_limit"]))
+        min_score_for_draft = int(config["campaign"]["minimum_score_for_draft"])
         for lead in leads:
             update = score_lead(lead)
-            merged = {**lead, **update}
+            classification = classify_scored_lead({**lead, **update}, min_score_for_draft)
+            merged = {**lead, **update, **classification}
             upsert_lead(conn, merged)
             record_outreach_event(conn, {"lead_id": lead["id"], "event_type": "scored", "metadata": update})
+            record_outreach_event(
+                conn,
+                {
+                    "lead_id": lead["id"],
+                    "event_type": classification["status"],
+                    "metadata": classification,
+                },
+            )
             scored.append(merged)
         conn.commit()
         return scored

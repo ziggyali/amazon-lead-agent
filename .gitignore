@@ -1,11 +1,19 @@
+.env
+config.yaml
+data/
+logs/
+credentials/
+token.json
+gmail_token.json
+*.sqlite
+*.sqlite3
+*.db
+*.log
 .venv/
 __pycache__/
 .pytest_cache/
 .mypy_cache/
+campaign_report.md
+minimax_benchmark.json
 *.pyc
-data/
-config.yaml
-*.sqlite3
-*.db
-.env
 

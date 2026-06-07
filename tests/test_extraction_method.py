@@ -1,0 +1,51 @@
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from amazon_lead_agent.agents.extraction_agent import run_extraction
+from amazon_lead_agent.tools.sqlite_store import get_connection, init_db, upsert_lead
+
+
+class ExtractionMethodTests(unittest.TestCase):
+    @patch("amazon_lead_agent.agents.extraction_agent.extract_brand_profile")
+    def test_extraction_method_recorded(self, mock_extract) -> None:
+        mock_extract.return_value = {
+            "company_name": "Acme",
+            "brand_name": "Acme",
+            "website": "https://example.com",
+            "amazon_links": [],
+            "amazon_evidence_summary": "",
+            "amazon_backlink_found": False,
+            "public_emails": ["hello@example.com"],
+            "contact_page_url": "https://example.com/contact",
+            "decision_maker_source_url": "https://example.com",
+            "pain_points": [],
+            "confidence": 0.5,
+            "source_quotes": [],
+            "source_urls": ["https://example.com"],
+            "extraction_method": "heuristic_fallback",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "leads.db"
+            init_db(db_path)
+            conn = get_connection(db_path)
+            try:
+                upsert_lead(conn, {"company_name": "Acme", "website": "https://example.com", "status": "discovered"})
+                conn.commit()
+            finally:
+                conn.close()
+            config = {"campaign": {"daily_discovery_limit": 10}}
+            run_extraction(config, db_path)
+            conn = get_connection(db_path)
+            try:
+                row = conn.execute("SELECT extraction_method, status FROM leads").fetchone()
+                self.assertEqual(row["extraction_method"], "heuristic_fallback")
+                self.assertEqual(row["status"], "enriched")
+            finally:
+                conn.close()
+
+
+if __name__ == "__main__":
+    unittest.main()
+

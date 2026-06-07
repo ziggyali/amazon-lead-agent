@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from html.parser import HTMLParser
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse, urlunparse
 import logging
 import time
 
@@ -12,6 +12,22 @@ from amazon_lead_agent.normalization import normalize_company_name, normalize_do
 
 LOGGER = logging.getLogger(__name__)
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AmazonLeadAgent/0.1"
+
+
+def clean_search_result_url(url: str) -> str:
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    if "uddg" in query and query["uddg"]:
+        return unquote(query["uddg"][0])
+    if parsed.netloc.endswith("duckduckgo.com") and "uddg=" in parsed.query:
+        match = parse_qs(parsed.query)
+        if match.get("uddg"):
+            return unquote(match["uddg"][0])
+    if parsed.scheme in {"http", "https"}:
+        return urlunparse(parsed._replace(fragment=""))
+    return url
 
 
 class _DuckDuckGoParser(HTMLParser):
@@ -83,11 +99,13 @@ def search_web(query: str, limit: int = 10) -> list[dict]:
         parser.feed(response.text)
         results: list[dict] = []
         for item in parser.results[:limit]:
-            parsed = urlparse(item["url"])
+            cleaned_url = clean_search_result_url(item["url"])
+            parsed = urlparse(cleaned_url)
             results.append(
                 {
                     "title": item.get("title", "").strip(),
-                    "url": item.get("url", "").strip(),
+                    "url": cleaned_url,
+                    "raw_url": item.get("url", "").strip(),
                     "snippet": item.get("snippet", "").strip(),
                     "domain": normalize_domain(parsed.netloc or parsed.path),
                     "source": "duckduckgo",

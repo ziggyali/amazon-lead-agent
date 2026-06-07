@@ -135,10 +135,16 @@ def append_daily_report(sheet_id: str, report: dict) -> None:
     service = _build_service()
     payload = {
         "report_date": report.get("report_date", _utc_now()[:10]),
+        "campaign": report.get("campaign", "Amazon Lead Agent"),
         "discovery_count": report.get("discovery_count", 0),
         "enrichment_count": report.get("enrichment_count", 0),
         "scoring_count": report.get("scoring_count", 0),
-        "draft_count": report.get("draft_count", 0),
+        "approved_count": report.get("approved_count", 0),
+        "rejected_count": report.get("rejected_count", 0),
+        "draft_count": report.get("draft_count", report.get("drafts_created", 0)),
+        "contact_form_queue_count": report.get("contact_form_queue_count", 0),
+        "extraction_fallback_count": report.get("extraction_fallback_count", 0),
+        "errors": report.get("errors", 0),
         "notes": report.get("notes", ""),
         "created_at": report.get("created_at", _utc_now()),
     }
