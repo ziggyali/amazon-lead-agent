@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from datetime import datetime, timezone
+import json
 from typing import Any
 
 from amazon_lead_agent.agents.discovery_agent import run_discovery
@@ -51,12 +52,27 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
         "contact_form_queue_count": 0,
         "extraction_fallback_count": 0,
         "errors": 0,
+        "search_provider_counts": {},
+        "search_blocked_query_counts": {},
+        "search_rate_limited_query_counts": {},
+        "rejected_content_domains_count": 0,
+        "rejected_listicle_domains_count": 0,
+        "llm_provider_counts": {},
+        "llm_model_counts": {},
+        "sheet_mirror_status": "disabled" if not sheet_id else "enabled",
         "top_5_leads": [],
     }
 
     if mode in {"full", "discover"}:
-        discovered = run_discovery(config, db_path)
+        discovery_result = run_discovery(config, db_path)
+        discovered = discovery_result.get("leads", [])
+        search_stats = discovery_result.get("search_stats", {})
         report["discovered_count"] = len(discovered)
+        report["search_provider_counts"] = search_stats.get("provider_counts", {})
+        report["search_blocked_query_counts"] = search_stats.get("blocked_query_counts", {})
+        report["search_rate_limited_query_counts"] = search_stats.get("rate_limited_query_counts", {})
+        report["rejected_content_domains_count"] = int(search_stats.get("rejected_content_domains_count", 0))
+        report["rejected_listicle_domains_count"] = int(search_stats.get("rejected_listicle_domains_count", 0))
         for lead in discovered:
             _mirror_lead(sheet_id, "Lead Queue", lead)
             _mirror_outreach(sheet_id, {"lead_id": lead["id"], "event_type": "discovered", "metadata": {"status": lead.get("status", "")}})
@@ -72,6 +88,12 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
             if lead.get("status") in {"extraction_error", "blocked_or_error"}:
                 report["errors"] += 1
                 _mirror_outreach(sheet_id, {"lead_id": lead.get("id", ""), "event_type": "error", "metadata": {"status": lead.get("status", "")}})
+            provider = str(lead.get("llm_provider_used", "") or "").strip()
+            model = str(lead.get("llm_model_used", "") or "").strip()
+            if provider:
+                report["llm_provider_counts"][provider] = report["llm_provider_counts"].get(provider, 0) + 1
+            if model:
+                report["llm_model_counts"][model] = report["llm_model_counts"].get(model, 0) + 1
 
     if mode in {"full", "score"}:
         scored = run_scoring(config, db_path)
@@ -100,6 +122,23 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
     report_path = write_campaign_report(db_path)
     report["campaign_report_path"] = report_path["path"]
     report["top_5_leads"] = report_path["top_leads"]
+    report["notes_json"] = json.dumps(
+        {
+            "mode": mode,
+            "dry_run": dry_run,
+            "sheet_mirror_status": report["sheet_mirror_status"],
+            "search_provider_counts": report["search_provider_counts"],
+            "search_blocked_query_counts": report["search_blocked_query_counts"],
+            "search_rate_limited_query_counts": report["search_rate_limited_query_counts"],
+            "rejected_content_domains_count": report["rejected_content_domains_count"],
+            "rejected_listicle_domains_count": report["rejected_listicle_domains_count"],
+            "extraction_fallback_count": report["extraction_fallback_count"],
+            "llm_provider_counts": report["llm_provider_counts"],
+            "llm_model_counts": report["llm_model_counts"],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
     _mirror_daily_report(
         sheet_id,
         {
@@ -116,7 +155,7 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
             "contact_form_queue_count": report["contact_form_queue_count"],
             "extraction_fallback_count": report["extraction_fallback_count"],
             "errors": report["errors"],
-            "notes": f"mode={mode}; dry_run={dry_run}",
+            "notes": report["notes_json"],
         },
     )
     return report

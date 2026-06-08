@@ -24,6 +24,22 @@ class ScoringAgentTests(unittest.TestCase):
         scored = score_lead({"company_name": "", "website": "", "category": "other"})
         self.assertEqual(scored["tier"], "Reject")
 
+    def test_blocked_extraction_without_verified_signals_is_capped(self) -> None:
+        lead = {
+            "company_name": "Acme",
+            "website": "https://example.com",
+            "category": "beauty",
+            "extraction_method": "blocked_or_error",
+            "amazon_backlink_found": False,
+            "amazon_links": [],
+            "public_emails": [],
+            "contact_page_url": "",
+            "source_urls": ["https://example.com"],
+        }
+        scored = score_lead(lead)
+        self.assertLessEqual(scored["score"], 45)
+        self.assertEqual(scored["tier"], "Reject")
+
 
 if __name__ == "__main__":
     unittest.main()

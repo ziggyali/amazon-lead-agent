@@ -30,6 +30,9 @@ Fill these values in `.env`:
 - `MINIMAX_MODEL=MiniMax-M3`
 - `MINIMAX_FALLBACK_MODEL=MiniMax-M2.7`
 - `GOOGLE_SERVICE_ACCOUNT_FILE` or `GOOGLE_SERVICE_ACCOUNT_JSON`
+- `GOOGLE_OAUTH_CREDENTIALS_FILE`
+- `GOOGLE_OAUTH_TOKEN_FILE`
+- `GOOGLE_SHEETS_AUTH_MODE=auto`
 - `GOOGLE_SHEET_ID`
 - `GMAIL_SENDER_EMAIL`
 - `GMAIL_CREDENTIALS_FILE`
@@ -141,6 +144,14 @@ python scripts/create_google_sheet.py --title "Amazon Lead Agent CRM"
 ```
 
 Then copy the printed spreadsheet ID into `config.yaml` or set `GOOGLE_SHEET_ID`.
+
+If Hermes created the sheet with Workspace OAuth, set:
+
+- `GOOGLE_SHEETS_AUTH_MODE=oauth`
+- `GOOGLE_OAUTH_CREDENTIALS_FILE`
+- `GOOGLE_OAUTH_TOKEN_FILE`
+
+If you still use a service account, leave the auth mode on `auto` or set it to `service_account`.
 
 ## Gmail OAuth setup
 

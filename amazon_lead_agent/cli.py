@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from amazon_lead_agent.config import load_config, get_storage_path
@@ -30,6 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     init_db(db_path)
     if args.dry_run:
         print("DRY RUN enabled: Gmail drafts will not be created.")
-    run_campaign(config, db_path, mode=args.mode, dry_run=args.dry_run)
+    report = run_campaign(config, db_path, mode=args.mode, dry_run=args.dry_run)
+    print(json.dumps(report, indent=2, ensure_ascii=False, sort_keys=True))
     return 0
 

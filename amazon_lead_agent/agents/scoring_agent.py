@@ -17,6 +17,7 @@ def _truthy(value: object) -> bool:
 def score_lead(lead: dict) -> dict:
     score = 0
     reasons: list[str] = []
+    extraction_method = str(lead.get("extraction_method") or "").strip().lower()
 
     amazon_backlink = _truthy(lead.get("amazon_backlink_found"))
     amazon_links = lead.get("amazon_links") or lead.get("amazon_links_json") or []
@@ -72,6 +73,14 @@ def score_lead(lead: dict) -> dict:
     if not (lead.get("company_name") or lead.get("brand_name") or lead.get("website")):
         score -= 20
         reasons.append("Weak/unclear brand")
+
+    if extraction_method == "blocked_or_error":
+        verified_evidence = bool(amazon_backlink or amazon_links)
+        contact_path = bool(public_emails or contact_page)
+        direct_llm = bool((lead.get("llm_provider_used") or "").strip() and (lead.get("llm_model_used") or "").strip())
+        if not (verified_evidence or contact_path or direct_llm):
+            score = min(score, 45)
+            reasons.append("Blocked extraction guardrail")
 
     score = max(0, min(100, score))
     if score >= 85:

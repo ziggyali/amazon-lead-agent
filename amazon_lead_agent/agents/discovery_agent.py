@@ -4,7 +4,7 @@ from pathlib import Path
 
 from amazon_lead_agent.normalization import make_lead_id, normalize_company_name
 from amazon_lead_agent.tools.amazon_backlink_discovery import contains_amazon_buying_signal
-from amazon_lead_agent.tools.search import discover_candidates
+from amazon_lead_agent.tools.search import discover_candidates, get_last_search_stats
 from amazon_lead_agent.tools.sqlite_store import get_connection, upsert_lead, record_outreach_event
 
 
@@ -29,7 +29,7 @@ def _candidate_from_result(result: dict[str, str], category: str) -> dict[str, o
     }
 
 
-def run_discovery(config: dict, db_path: Path) -> list[dict]:
+def run_discovery(config: dict, db_path: Path) -> dict:
     conn = get_connection(db_path)
     discovered: list[dict] = []
     try:
@@ -49,7 +49,7 @@ def run_discovery(config: dict, db_path: Path) -> list[dict]:
             )
             discovered.append({**lead, "id": lead_id})
         conn.commit()
-        return discovered
+        return {"leads": discovered, "search_stats": get_last_search_stats()}
     finally:
         conn.close()
 

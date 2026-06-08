@@ -1,22 +1,39 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from io import StringIO
+import logging
 import json
+import os
 from pathlib import Path
+from typing import Any
+
+LOGGER = logging.getLogger(__name__)
+
+SPREADSHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
+
+
+def _auth_mode() -> str:
+    return os.environ.get("GOOGLE_SHEETS_AUTH_MODE", "auto").strip().lower() or "auto"
+
+
+def _service_account_configured() -> bool:
+    return bool(os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip() or os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip())
+
+
+def _oauth_configured() -> bool:
+    return bool(os.environ.get("GOOGLE_OAUTH_CREDENTIALS_FILE", "").strip() or os.environ.get("GOOGLE_OAUTH_TOKEN_FILE", "").strip())
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _load_credentials():
-    import os
+def _load_service_account_credentials():
     from google.oauth2 import service_account
 
     file_path = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "")
     json_blob = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    scopes = [SPREADSHEETS_SCOPE]
     if file_path:
         return service_account.Credentials.from_service_account_file(file_path, scopes=scopes)
     if json_blob:
@@ -24,10 +41,74 @@ def _load_credentials():
     raise RuntimeError("Google service account credentials are not configured.")
 
 
-def _build_service():
+def _load_oauth_credentials() -> Any:
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+    from google_auth_oauthlib.flow import InstalledAppFlow
+
+    credentials_file = os.environ.get("GOOGLE_OAUTH_CREDENTIALS_FILE", "").strip()
+    token_file = os.environ.get("GOOGLE_OAUTH_TOKEN_FILE", "").strip()
+    scopes = [SPREADSHEETS_SCOPE]
+
+    creds = None
+    token_path = Path(token_file) if token_file else None
+    if token_path and token_path.exists():
+        creds = Credentials.from_authorized_user_file(str(token_path), scopes=scopes)
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            token_path.write_text(creds.to_json(), encoding="utf-8")
+            return creds
+        if creds and creds.valid:
+            return creds
+
+    if not credentials_file:
+        raise RuntimeError("Google OAuth credentials are not configured.")
+
+    flow = InstalledAppFlow.from_client_secrets_file(credentials_file, scopes=scopes)
+    try:
+        creds = flow.run_local_server(port=0)
+    except Exception as exc:  # noqa: BLE001
+        if hasattr(flow, "run_console"):
+            try:
+                creds = flow.run_console()
+            except Exception as console_exc:  # noqa: BLE001
+                raise RuntimeError(f"OAuth flow failed: {exc}; {console_exc}") from console_exc
+        else:
+            raise RuntimeError(f"OAuth flow failed: {exc}") from exc
+    if token_path:
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(creds.to_json(), encoding="utf-8")
+    return creds
+
+
+def _load_credentials(auth_mode: str | None = None):
+    mode = (auth_mode or _auth_mode()).strip().lower()
+    if mode == "service_account":
+        return _load_service_account_credentials()
+    if mode == "oauth":
+        return _load_oauth_credentials()
+
+    service_configured = _service_account_configured()
+    oauth_configured = _oauth_configured()
+
+    if service_configured:
+        try:
+            return _load_service_account_credentials()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.info("service account auth failed, trying OAuth fallback: %s", exc)
+
+    if oauth_configured:
+        return _load_oauth_credentials()
+
+    if service_configured:
+        return _load_service_account_credentials()
+    raise RuntimeError("Google Sheets credentials are not configured for service account or OAuth auth modes.")
+
+
+def _build_service(auth_mode: str | None = None):
     from googleapiclient.discovery import build
 
-    creds = _load_credentials()
+    creds = _load_credentials(auth_mode=auth_mode)
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 

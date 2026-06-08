@@ -51,6 +51,7 @@ bash scripts/run_local.sh
 - Direct MiniMax API is supported.
 - ScrapeGraphAI is optional and used when it works locally.
 - OpenAI is optional and requires a real OpenAI API key from the OpenAI platform. ChatGPT Business alone may not include API access.
+- Google Sheets supports either service-account auth or Workspace OAuth for Hermes-created sheets.
 
 See `LOCAL_SETUP.md` for exact environment variables and verification commands.
 

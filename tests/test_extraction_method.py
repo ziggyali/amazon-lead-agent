@@ -120,6 +120,51 @@ class ExtractionMethodTests(unittest.TestCase):
         self.assertEqual(profile["extraction_method"], "gemini_direct")
         self.assertEqual(profile["company_name"], "Example Brand")
 
+    @patch("amazon_lead_agent.tools.scrapegraph_runner._build_snapshot")
+    def test_scrapegraph_llm_failure_falls_through_to_direct_llm(self, mock_snapshot) -> None:
+        mock_snapshot.return_value = {
+            "url": "https://example.com",
+            "html": "<html></html>",
+            "text": "Example text",
+            "links": [],
+            "amazon_links": [],
+            "contact_links": [],
+            "public_emails": [],
+            "blocked": False,
+            "title": "Example Brand",
+            "source_urls": ["https://example.com"],
+        }
+
+        class FakeSmartScraperGraph:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def run(self):
+                raise RuntimeError("'llm'")
+
+        class FakeRouter:
+            last_used_provider = "minimax"
+            last_used_model = "MiniMax-M3"
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def generate_json(self, prompt, purpose="extraction"):
+                return {
+                    "company_name": "Example Brand",
+                    "brand_name": "Example Brand",
+                    "website": "https://example.com",
+                    "source_urls": ["https://example.com"],
+                }
+
+        fake_module = SimpleNamespace(SmartScraperGraph=FakeSmartScraperGraph)
+        with patch.dict(sys.modules, {"scrapegraphai": SimpleNamespace(graphs=fake_module), "scrapegraphai.graphs": fake_module}), patch("amazon_lead_agent.tools.scrapegraph_runner.LLMRouter", FakeRouter):
+            profile = extract_brand_profile("https://example.com", minimax_api_key="test")
+
+        self.assertEqual(profile["extraction_method"], "minimax_direct_m3")
+        self.assertEqual(profile["scrapegraph_error"], "'llm'")
+        self.assertEqual(profile["llm_provider_used"], "minimax")
+
 
 if __name__ == "__main__":
     unittest.main()

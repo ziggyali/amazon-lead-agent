@@ -152,12 +152,12 @@ def _normalize_profile(profile: dict, url: str, snapshot: dict, extraction_metho
     return profile
 
 
-def _scrapegraph_attempt(url: str, snapshot: dict) -> dict | None:
+def _scrapegraph_attempt(url: str, snapshot: dict) -> tuple[dict | None, str | None]:
     try:
         from scrapegraphai.graphs import SmartScraperGraph
     except Exception as exc:  # noqa: BLE001
         LOGGER.info("ScrapeGraphAI not available: %s", exc)
-        return None
+        return None, str(exc)
     try:
         prompt = load_prompt("extract_brand.md")
         graph = SmartScraperGraph(
@@ -178,10 +178,11 @@ def _scrapegraph_attempt(url: str, snapshot: dict) -> dict | None:
         # The public ScrapeGraphAI docs do not document a MiniMax provider config.
         # Label the extraction conservatively unless an explicit, verified MiniMax
         # integration is added later.
-        return _normalize_profile(parsed, url, snapshot, "scrapegraphai_other")
+        return _normalize_profile(parsed, url, snapshot, "scrapegraphai_other"), None
     except Exception as exc:  # noqa: BLE001
-        LOGGER.warning("ScrapeGraphAI extraction failed for %s: %s", url, exc)
-        return None
+        message = str(exc)
+        LOGGER.warning("ScrapeGraphAI extraction failed for %s: %s", url, message)
+        return None, message
 
 
 def _extraction_method_for_router(router: LLMRouter) -> str:
@@ -197,16 +198,35 @@ def _extraction_method_for_router(router: LLMRouter) -> str:
 
 
 def extract_brand_profile(url: str, minimax_api_key: str | None = None, llm_config: dict | None = None) -> dict:
-    snapshot = _build_snapshot(url)
+    try:
+        snapshot = _build_snapshot(url)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Snapshot build failed for %s: %s", url, exc)
+        snapshot = {
+            "url": url,
+            "html": "",
+            "text": "",
+            "links": [],
+            "amazon_links": [],
+            "contact_links": [],
+            "public_emails": [],
+            "blocked": True,
+            "title": "",
+            "source_urls": [url],
+        }
     if snapshot["blocked"]:
         blocked_profile = _heuristic_profile(url, snapshot)
         blocked_profile["extraction_method"] = "blocked_or_error"
         blocked_profile["notes"] = "public page appears blocked or challenged"
         blocked_profile["blocked_or_error"] = True
+        blocked_profile["scrapegraph_error"] = ""
+        blocked_profile["extraction_error"] = "public page appears blocked or challenged"
         return blocked_profile
 
-    scrapegraph_profile = _scrapegraph_attempt(url, snapshot)
+    scrapegraph_profile, scrapegraph_error = _scrapegraph_attempt(url, snapshot)
     if scrapegraph_profile:
+        scrapegraph_profile["scrapegraph_error"] = scrapegraph_error or ""
+        scrapegraph_profile["extraction_error"] = ""
         return scrapegraph_profile
 
     prompt = _build_prompt(url, snapshot)
@@ -214,12 +234,29 @@ def extract_brand_profile(url: str, minimax_api_key: str | None = None, llm_conf
     try:
         profile = router.generate_json(prompt, purpose="extraction")
         extraction_method = _extraction_method_for_router(router)
-        return _normalize_profile(profile, url, snapshot, extraction_method)
+        normalized = _normalize_profile(profile, url, snapshot, extraction_method)
+        normalized["scrapegraph_error"] = scrapegraph_error or ""
+        normalized["extraction_error"] = ""
+        normalized["llm_provider_used"] = router.last_used_provider or ""
+        normalized["llm_model_used"] = router.last_used_model or ""
+        return normalized
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning("Direct LLM extraction failed for %s: %s", url, exc)
         if _allow_heuristic_fallback():
             profile = _heuristic_profile(url, snapshot)
             profile["extraction_method"] = "heuristic_fallback"
             profile["notes"] = str(exc)
+            profile["scrapegraph_error"] = scrapegraph_error or ""
+            profile["extraction_error"] = str(exc)
+            profile["llm_provider_used"] = router.last_used_provider or ""
+            profile["llm_model_used"] = router.last_used_model or ""
             return profile
-        raise
+        blocked_profile = _heuristic_profile(url, snapshot)
+        blocked_profile["extraction_method"] = "blocked_or_error"
+        blocked_profile["notes"] = str(exc)
+        blocked_profile["blocked_or_error"] = True
+        blocked_profile["scrapegraph_error"] = scrapegraph_error or ""
+        blocked_profile["extraction_error"] = str(exc)
+        blocked_profile["llm_provider_used"] = router.last_used_provider or ""
+        blocked_profile["llm_model_used"] = router.last_used_model or ""
+        return blocked_profile
