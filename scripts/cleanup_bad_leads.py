@@ -25,6 +25,7 @@ CONTENT_DOMAIN_BLOCKLIST = {
 
 LISTICLE_TITLE_KEYWORDS = ("best", "top", "award winners", "list", "review")
 
+
 def _normalize_path(path: str) -> str:
     return Path(path or "data/leads.db").as_posix()
 
@@ -53,6 +54,21 @@ def _is_bing_redirect(value: str) -> bool:
     return "bing.com/ck/a" in lowered or "bing.com/ck/" in lowered or "bing.com/aclick" in lowered
 
 
+def _verified_amazon_evidence(lead: dict) -> bool:
+    if bool(lead.get("amazon_backlink_found")):
+        return True
+    try:
+        links = json.loads(lead.get("amazon_links_json") or "[]")
+        if isinstance(links, list) and links:
+            return True
+    except json.JSONDecodeError:
+        pass
+    evidence_url = lead.get("amazon_evidence_url") or lead.get("amazon_evidence_urls") or []
+    if isinstance(evidence_url, str):
+        evidence_url = [evidence_url]
+    return bool(evidence_url)
+
+
 def _classify_lead(lead: sqlite3.Row) -> dict[str, str] | None:
     lead = dict(lead)
     website = str(lead["website"] or "").strip()
@@ -60,6 +76,9 @@ def _classify_lead(lead: sqlite3.Row) -> dict[str, str] | None:
     domains = _lead_domains(lead)
     snippet = str(lead.get("amazon_evidence_summary") or lead.get("description") or "")
     category = str(lead.get("category") or "")
+    status = str(lead.get("status") or "").strip().lower()
+    extraction_method = str(lead.get("extraction_method") or "").strip().lower()
+    needs_review_status = status in {"approved", "draft_preview", "contact_form_queue", "scored", "enriched"}
 
     if website and _is_bing_redirect(website):
         return {"status": "rejected", "review_status": "rejected", "send_status": "not_eligible", "reason": "bing redirect website"}
@@ -74,17 +93,22 @@ def _classify_lead(lead: sqlite3.Row) -> dict[str, str] | None:
     if any(keyword in title for keyword in LISTICLE_TITLE_KEYWORDS) and not any(domain and domain not in CONTENT_DOMAIN_BLOCKLIST for domain in domains):
         return {"status": "rejected", "review_status": "rejected", "send_status": "not_eligible", "reason": "listicle title"}
 
-    extraction_method = str(lead["extraction_method"] or "").strip().lower()
     score = int(lead["score"] or 0)
-    if extraction_method == "blocked_or_error" and score >= 75:
-        has_contact = bool((lead.get("public_emails_json") or "[]") != "[]" or (lead.get("contact_page_url") or ""))
-        has_amazon = bool(lead["amazon_backlink_found"])
-        if not (has_contact or has_amazon):
+    has_verified_amazon = _verified_amazon_evidence(lead)
+    if extraction_method == "blocked_or_error" and needs_review_status:
+        if score >= 75:
             return {"status": "needs_enrichment", "review_status": "needs_enrichment", "send_status": "not_eligible", "reason": "blocked_or_error high score without verified signals"}
+        return {"status": "needs_enrichment", "review_status": "needs_enrichment", "send_status": "not_eligible", "reason": "blocked_or_error in positive queue"}
+    if needs_review_status and not category:
+        return {"status": "needs_enrichment" if not is_junk_company_name(title) else "rejected", "review_status": "needs_enrichment" if not is_junk_company_name(title) else "rejected", "send_status": "not_eligible", "reason": "positive queue missing category"}
+    if needs_review_status and not has_verified_amazon:
+        return {"status": "needs_enrichment" if not is_junk_company_name(title) else "rejected", "review_status": "needs_enrichment" if not is_junk_company_name(title) else "rejected", "send_status": "not_eligible", "reason": "positive queue without verified Amazon evidence"}
     if lead.get("status") == "approved" and (not category or category == ""):
         return {"status": "rejected", "review_status": "rejected", "send_status": "not_eligible", "reason": "approved lead missing category"}
     if not is_likely_brand_domain(website, title, snippet, category) and website:
-        return {"status": "rejected", "review_status": "rejected", "send_status": "not_eligible", "reason": "not likely brand domain"}
+        return {"status": "needs_enrichment", "review_status": "needs_enrichment", "send_status": "not_eligible", "reason": "not likely brand domain"}
+    if score >= 75 and not has_verified_amazon and status in {"approved", "draft_preview", "contact_form_queue"}:
+        return {"status": "needs_enrichment" if not is_junk_company_name(title) else "rejected", "review_status": "needs_enrichment" if not is_junk_company_name(title) else "rejected", "send_status": "not_eligible", "reason": "high score without verified Amazon evidence"}
     return None
 
 
@@ -119,8 +143,8 @@ def apply_cleanup(conn: sqlite3.Connection, actions: list[dict[str, str]]) -> in
                 "status": action["status"],
                 "review_status": action["review_status"],
                 "send_status": action["send_status"],
-                "tier": "Reject",
-                "score": min(int(payload.get("score") or 0), 25),
+                "tier": "Reject" if action["status"] == "rejected" else "C",
+                "score": min(int(payload.get("score") or 0), 25 if action["status"] == "rejected" else 45),
                 "draft_preview_subject": "",
                 "draft_preview_body": "",
                 "draft_subject": "",

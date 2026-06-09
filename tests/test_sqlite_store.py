@@ -91,6 +91,32 @@ class SQLiteStoreTests(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_init_db_adds_cleanup_reason_column_to_existing_database(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "leads.db"
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE leads (
+                        id TEXT PRIMARY KEY,
+                        company_name TEXT,
+                        website TEXT,
+                        status TEXT
+                    )
+                    """
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            init_db(db_path)
+            conn = get_connection(db_path)
+            try:
+                columns = {row["name"] for row in conn.execute("PRAGMA table_info(leads)").fetchall()}
+                self.assertIn("cleanup_reason", columns)
+            finally:
+                conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

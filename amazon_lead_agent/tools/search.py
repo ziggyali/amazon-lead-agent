@@ -67,6 +67,10 @@ def _new_stats() -> dict:
         "rate_limited_query_counts": defaultdict(int),
         "rejected_content_domain_count": 0,
         "rejected_listicle_domains_count": 0,
+        "hard_rejected_junk_count": 0,
+        "soft_pass_needs_enrichment_count": 0,
+        "rejected_due_to_no_amazon_evidence_count": 0,
+        "discovered_count_by_category": defaultdict(int),
         "cleaned_redirect_count": 0,
         "rejected_redirect_count": 0,
     }
@@ -86,6 +90,7 @@ def get_last_search_stats() -> dict:
     stats["provider_blocked_counts"] = dict(stats["provider_blocked_counts"])
     stats["blocked_query_counts"] = dict(stats["blocked_query_counts"])
     stats["rate_limited_query_counts"] = dict(stats["rate_limited_query_counts"])
+    stats["discovered_count_by_category"] = dict(stats["discovered_count_by_category"])
     return stats
 
 

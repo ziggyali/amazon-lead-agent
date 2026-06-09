@@ -303,7 +303,7 @@ def get_leads_for_enrichment(conn: sqlite3.Connection, limit: int) -> list[dict]
         conn,
         """
         SELECT * FROM leads
-        WHERE status IN ('new', 'discovered', 'extraction_error')
+        WHERE status IN ('new', 'discovered', 'needs_enrichment', 'extraction_error')
         ORDER BY datetime(created_at) ASC
         LIMIT ?
         """,

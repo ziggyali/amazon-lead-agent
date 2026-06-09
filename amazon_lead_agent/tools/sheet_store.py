@@ -179,7 +179,7 @@ class SheetStore:
         self.upsert_lead(lead, tab="Approved Leads")
 
     def get_leads_for_enrichment(self, limit: int) -> list[dict[str, Any]]:
-        leads = [lead for lead in self.get_all_leads() if str(lead.get("status", "")).lower() in {"new", "discovered", "extraction_error"}]
+        leads = [lead for lead in self.get_all_leads() if str(lead.get("status", "")).lower() in {"new", "discovered", "needs_enrichment", "extraction_error"}]
         leads.sort(key=lambda item: str(item.get("created_at") or item.get("updated_at") or ""))
         return leads[:limit]
 

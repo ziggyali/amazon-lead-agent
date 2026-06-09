@@ -109,6 +109,48 @@ class CleanupBadLeadsTests(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_contact_form_queue_without_amazon_is_demoted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "leads.db"
+            init_db(db_path)
+            conn = get_connection(db_path)
+            try:
+                upsert_lead(
+                    conn,
+                    {
+                        "id": "lead-4",
+                        "company_name": "Brand Example",
+                        "website": "https://brand.example.com",
+                        "category": "beauty",
+                        "score": 80,
+                        "tier": "B",
+                        "status": "contact_form_queue",
+                        "review_status": "needs_contact_form",
+                        "send_status": "contact_form_queue",
+                        "public_emails": [],
+                        "contact_page_url": "https://brand.example.com/contact",
+                        "amazon_backlink_found": False,
+                        "amazon_links": [],
+                        "extraction_method": "minimax_direct_m3",
+                    },
+                )
+                conn.commit()
+                actions = find_cleanup_actions(conn)
+                self.assertEqual(len(actions), 1)
+                self.assertEqual(actions[0]["status"], "needs_enrichment")
+                self.assertEqual(actions[0]["reason"], "positive queue without verified Amazon evidence")
+                updated = apply_cleanup(conn, actions)
+                self.assertEqual(updated, 1)
+                row = conn.execute("SELECT status, review_status, send_status, tier, score, cleanup_reason FROM leads WHERE id = ?", ("lead-4",)).fetchone()
+                self.assertEqual(row["status"], "needs_enrichment")
+                self.assertEqual(row["review_status"], "needs_enrichment")
+                self.assertEqual(row["send_status"], "not_eligible")
+                self.assertEqual(row["tier"], "C")
+                self.assertLessEqual(row["score"], 45)
+                self.assertEqual(row["cleanup_reason"], "positive queue without verified Amazon evidence")
+            finally:
+                conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

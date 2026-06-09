@@ -132,6 +132,10 @@ class DryRunTests(unittest.TestCase):
                         "rate_limited_query_counts": {"duckduckgo": 0},
                         "rejected_content_domains_count": 0,
                         "rejected_listicle_domains_count": 0,
+                        "hard_rejected_junk_count": 0,
+                        "soft_pass_needs_enrichment_count": 1,
+                        "rejected_due_to_no_amazon_evidence_count": 0,
+                        "discovered_count_by_category": {"beauty": 1},
                     },
                 }
 
@@ -213,6 +217,8 @@ class DryRunTests(unittest.TestCase):
             self.assertEqual(report["queries_attempted_by_provider"], {"duckduckgo": 1})
             self.assertEqual(report["cleaned_redirect_count"], 0)
             self.assertEqual(report["rejected_redirect_count"], 0)
+            self.assertEqual(report["soft_pass_needs_enrichment_count"], 1)
+            self.assertEqual(report["discovered_count_by_category"], {"beauty": 1})
 
     @patch("amazon_lead_agent.runtime.get_storage_router")
     @patch("amazon_lead_agent.runtime.run_outreach", return_value=[])

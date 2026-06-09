@@ -61,6 +61,21 @@ class ScoringClassificationTests(unittest.TestCase):
         self.assertEqual(outcome["status"], "needs_enrichment")
         self.assertEqual(outcome["send_status"], "not_eligible")
 
+    def test_contact_form_queue_requires_verified_amazon_evidence(self) -> None:
+        lead = {
+            "score": 80,
+            "tier": "B",
+            "company_name": "Brand Example",
+            "website": "https://brand.example.com",
+            "category": "beauty",
+            "public_emails": [],
+            "contact_page_url": "https://brand.example.com/contact",
+            "extraction_method": "minimax_direct_m3",
+        }
+        outcome = classify_scored_lead(lead, 75, allowed_categories={"beauty"})
+        self.assertNotEqual(outcome["status"], "contact_form_queue")
+        self.assertEqual(outcome["send_status"], "not_eligible")
+
 
 if __name__ == "__main__":
     unittest.main()
