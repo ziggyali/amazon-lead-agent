@@ -231,6 +231,391 @@ class DryRunTests(unittest.TestCase):
 
     @patch("amazon_lead_agent.runtime.get_storage_router")
     @patch("amazon_lead_agent.runtime.run_outreach", return_value=[])
+    @patch("amazon_lead_agent.runtime.run_scoring")
+    @patch("amazon_lead_agent.runtime.run_extraction")
+    @patch("amazon_lead_agent.runtime.run_discovery")
+    def test_discover_dry_run_persists_candidates_and_flushes_storage(
+        self,
+        mock_discovery,
+        mock_extraction,
+        mock_scoring,
+        mock_outreach,
+        mock_get_storage_router,
+    ) -> None:
+        class FakeStorage:
+            uses_sheets = True
+
+            def __init__(self):
+                self.rows_by_id = {}
+                self.upsert_calls = []
+                self.commit_calls = 0
+                self.failed_sheet_rows = []
+                self.sheet_mirror_error_count = 0
+                self.sheet_flush_errors = []
+                self.sheet_read_error_count = 0
+                self.sheet_read_retry_count = 0
+                self.sheet_connection_error_count = 0
+                self.failed_sheet_reads = []
+
+            def upsert_lead(self, lead, tab=None):
+                lead_id = lead.get("id") or f"lead-{len(self.upsert_calls)+1}"
+                stored = dict(lead)
+                stored["id"] = lead_id
+                self.rows_by_id[lead_id] = stored
+                self.upsert_calls.append((tab, stored))
+                return lead_id
+
+            def record_outreach_event(self, event):
+                return None
+
+            def get_leads_for_enrichment(self, limit):
+                return []
+
+            def get_leads_for_scoring(self, limit):
+                return []
+
+            def get_leads_for_drafting(self, min_score, limit):
+                return []
+
+            def append_daily_report(self, report):
+                return None
+
+            def snapshot(self):
+                return {
+                    "sheet_mirror_error_count": self.sheet_mirror_error_count,
+                    "failed_sheet_rows": list(self.failed_sheet_rows),
+                    "sheet_flush_errors": list(self.sheet_flush_errors),
+                    "sheet_read_error_count": self.sheet_read_error_count,
+                    "sheet_read_retry_count": self.sheet_read_retry_count,
+                    "sheet_connection_error_count": self.sheet_connection_error_count,
+                    "failed_sheet_reads": list(self.failed_sheet_reads),
+                    "uses_sheets": True,
+                    "mode": "sheets",
+                }
+
+            def commit(self):
+                self.commit_calls += 1
+                return None
+
+            def close(self):
+                return None
+
+        fake_storage = FakeStorage()
+        mock_get_storage_router.return_value = fake_storage
+        discovered = [
+            {
+                "id": "lead-1",
+                "company_name": "Glossier",
+                "website": "https://www.glossier.com",
+                "category": "beauty",
+                "status": "needs_enrichment",
+                "source_urls": ["https://www.glossier.com"],
+            },
+            {
+                "id": "lead-2",
+                "company_name": "Tatcha",
+                "website": "https://www.tatcha.com",
+                "category": "beauty",
+                "status": "needs_enrichment",
+                "source_urls": ["https://www.tatcha.com"],
+            },
+        ]
+        mock_discovery.return_value = {
+            "leads": discovered,
+            "search_stats": {
+                "provider_counts": {"seeded": 2},
+                "blocked_query_counts": {},
+                "rate_limited_query_counts": {},
+                "rejected_content_domain_count": 0,
+                "rejected_listicle_domains_count": 0,
+                "cleaned_redirect_count": 0,
+                "rejected_redirect_count": 0,
+                "hard_rejected_junk_count": 0,
+                "soft_pass_needs_enrichment_count": 2,
+                "rejected_likely_brand_filter_count": 0,
+                "rejected_due_to_no_amazon_evidence_count": 0,
+                "discovered_count_by_category": {"beauty": 2},
+                "query_budget_used": 0,
+                "query_budget_remaining": 8,
+                "discovery_runtime_seconds": 0.01,
+                "stopped_reason": "accepted_limit_reached",
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "leads.db"
+            init_db(db_path)
+            report = run_campaign(
+                {
+                    "storage": {"google_sheet_id": "sheet-123"},
+                    "campaign": {"minimum_score_for_draft": 75, "daily_draft_limit": 10, "daily_discovery_limit": 2},
+                    "sender": {"name": "Zaigham Ali", "offer": "Offer"},
+                },
+                db_path,
+                mode="discover",
+                dry_run=True,
+            )
+
+        self.assertEqual(len(fake_storage.upsert_calls), 2)
+        self.assertEqual(set(fake_storage.rows_by_id), {"lead-1", "lead-2"})
+        self.assertGreaterEqual(fake_storage.commit_calls, 1)
+        self.assertEqual(report["discovered_count"], 2)
+        self.assertEqual(report["discovered_persisted_count"], 2)
+        self.assertEqual(report["discovered_persist_failed_count"], 0)
+        self.assertEqual(report["lead_queue_rows_written"], 2)
+        self.assertEqual(report["storage_mode_used"], "sheets")
+        self.assertEqual(report["storage_flush_status"], "ok")
+        self.assertEqual(report["drafts_created"], 0)
+        mock_outreach.assert_not_called()
+
+    @patch("amazon_lead_agent.runtime.get_storage_router")
+    @patch("amazon_lead_agent.runtime.run_outreach", return_value=[])
+    @patch("amazon_lead_agent.runtime.run_scoring")
+    @patch("amazon_lead_agent.runtime.run_extraction")
+    @patch("amazon_lead_agent.runtime.run_discovery")
+    def test_duplicate_seed_discovery_updates_existing_row_not_duplicate_append(
+        self,
+        mock_discovery,
+        mock_extraction,
+        mock_scoring,
+        mock_outreach,
+        mock_get_storage_router,
+    ) -> None:
+        class FakeStorage:
+            uses_sheets = True
+
+            def __init__(self):
+                self.rows_by_id = {}
+                self.upsert_calls = []
+                self.commit_calls = 0
+                self.failed_sheet_rows = []
+                self.sheet_mirror_error_count = 0
+                self.sheet_flush_errors = []
+                self.sheet_read_error_count = 0
+                self.sheet_read_retry_count = 0
+                self.sheet_connection_error_count = 0
+                self.failed_sheet_reads = []
+
+            def upsert_lead(self, lead, tab=None):
+                lead_id = lead.get("id") or "lead-1"
+                stored = dict(lead)
+                stored["id"] = lead_id
+                self.rows_by_id[lead_id] = stored
+                self.upsert_calls.append((tab, stored))
+                return lead_id
+
+            def record_outreach_event(self, event):
+                return None
+
+            def get_leads_for_enrichment(self, limit):
+                return []
+
+            def get_leads_for_scoring(self, limit):
+                return []
+
+            def get_leads_for_drafting(self, min_score, limit):
+                return []
+
+            def append_daily_report(self, report):
+                return None
+
+            def snapshot(self):
+                return {
+                    "sheet_mirror_error_count": self.sheet_mirror_error_count,
+                    "failed_sheet_rows": list(self.failed_sheet_rows),
+                    "sheet_flush_errors": list(self.sheet_flush_errors),
+                    "sheet_read_error_count": self.sheet_read_error_count,
+                    "sheet_read_retry_count": self.sheet_read_retry_count,
+                    "sheet_connection_error_count": self.sheet_connection_error_count,
+                    "failed_sheet_reads": list(self.failed_sheet_reads),
+                    "uses_sheets": True,
+                    "mode": "sheets",
+                }
+
+            def commit(self):
+                self.commit_calls += 1
+                return None
+
+            def close(self):
+                return None
+
+        fake_storage = FakeStorage()
+        mock_get_storage_router.return_value = fake_storage
+        mock_discovery.return_value = {
+            "leads": [
+                {
+                    "id": "lead-dup",
+                    "company_name": "Glossier",
+                    "website": "https://www.glossier.com",
+                    "category": "beauty",
+                    "status": "needs_enrichment",
+                    "source_urls": ["https://www.glossier.com"],
+                },
+                {
+                    "id": "lead-dup",
+                    "company_name": "Glossier",
+                    "website": "https://www.glossier.com",
+                    "category": "beauty",
+                    "status": "needs_enrichment",
+                    "source_urls": ["https://www.glossier.com"],
+                },
+            ],
+            "search_stats": {
+                "provider_counts": {"seeded": 2},
+                "blocked_query_counts": {},
+                "rate_limited_query_counts": {},
+                "rejected_content_domain_count": 0,
+                "rejected_listicle_domains_count": 0,
+                "cleaned_redirect_count": 0,
+                "rejected_redirect_count": 0,
+                "hard_rejected_junk_count": 0,
+                "soft_pass_needs_enrichment_count": 2,
+                "rejected_likely_brand_filter_count": 0,
+                "rejected_due_to_no_amazon_evidence_count": 0,
+                "discovered_count_by_category": {"beauty": 2},
+                "query_budget_used": 0,
+                "query_budget_remaining": 8,
+                "discovery_runtime_seconds": 0.01,
+                "stopped_reason": "accepted_limit_reached",
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "leads.db"
+            init_db(db_path)
+            report = run_campaign(
+                {
+                    "storage": {"google_sheet_id": "sheet-123"},
+                    "campaign": {"minimum_score_for_draft": 75, "daily_draft_limit": 10, "daily_discovery_limit": 2},
+                    "sender": {"name": "Zaigham Ali", "offer": "Offer"},
+                },
+                db_path,
+                mode="discover",
+                dry_run=True,
+            )
+
+        self.assertEqual(len(fake_storage.rows_by_id), 1)
+        self.assertEqual(len(fake_storage.upsert_calls), 2)
+        self.assertEqual(report["discovered_persisted_count"], 2)
+        self.assertEqual(report["discovered_persist_failed_count"], 0)
+
+    @patch("amazon_lead_agent.runtime.get_storage_router")
+    @patch("amazon_lead_agent.runtime.run_outreach", return_value=[])
+    @patch("amazon_lead_agent.runtime.run_scoring")
+    @patch("amazon_lead_agent.runtime.run_extraction")
+    @patch("amazon_lead_agent.runtime.run_discovery")
+    def test_persistence_failure_appears_in_report(
+        self,
+        mock_discovery,
+        mock_extraction,
+        mock_scoring,
+        mock_outreach,
+        mock_get_storage_router,
+    ) -> None:
+        class FailingStorage:
+            uses_sheets = True
+
+            def __init__(self):
+                self.commit_calls = 0
+                self.failed_sheet_rows = []
+                self.sheet_mirror_error_count = 0
+                self.sheet_flush_errors = []
+                self.sheet_read_error_count = 0
+                self.sheet_read_retry_count = 0
+                self.sheet_connection_error_count = 0
+                self.failed_sheet_reads = []
+
+            def upsert_lead(self, lead, tab=None):
+                self.failed_sheet_rows.append({"tab": tab or "Lead Queue", "lead_id": lead.get("id", ""), "error": "write failed"})
+                raise ValueError("write failed")
+
+            def record_outreach_event(self, event):
+                return None
+
+            def get_leads_for_enrichment(self, limit):
+                return []
+
+            def get_leads_for_scoring(self, limit):
+                return []
+
+            def get_leads_for_drafting(self, min_score, limit):
+                return []
+
+            def append_daily_report(self, report):
+                return None
+
+            def snapshot(self):
+                return {
+                    "sheet_mirror_error_count": self.sheet_mirror_error_count,
+                    "failed_sheet_rows": list(self.failed_sheet_rows),
+                    "sheet_flush_errors": list(self.sheet_flush_errors),
+                    "sheet_read_error_count": self.sheet_read_error_count,
+                    "sheet_read_retry_count": self.sheet_read_retry_count,
+                    "sheet_connection_error_count": self.sheet_connection_error_count,
+                    "failed_sheet_reads": list(self.failed_sheet_reads),
+                    "uses_sheets": True,
+                    "mode": "sheets",
+                }
+
+            def commit(self):
+                self.commit_calls += 1
+                return None
+
+            def close(self):
+                return None
+
+        mock_get_storage_router.return_value = FailingStorage()
+        mock_discovery.return_value = {
+            "leads": [
+                {
+                    "id": "lead-1",
+                    "company_name": "Glossier",
+                    "website": "https://www.glossier.com",
+                    "category": "beauty",
+                    "status": "needs_enrichment",
+                    "source_urls": ["https://www.glossier.com"],
+                }
+            ],
+            "search_stats": {
+                "provider_counts": {"seeded": 1},
+                "blocked_query_counts": {},
+                "rate_limited_query_counts": {},
+                "rejected_content_domain_count": 0,
+                "rejected_listicle_domains_count": 0,
+                "cleaned_redirect_count": 0,
+                "rejected_redirect_count": 0,
+                "hard_rejected_junk_count": 0,
+                "soft_pass_needs_enrichment_count": 1,
+                "rejected_likely_brand_filter_count": 0,
+                "rejected_due_to_no_amazon_evidence_count": 0,
+                "discovered_count_by_category": {"beauty": 1},
+                "query_budget_used": 0,
+                "query_budget_remaining": 8,
+                "discovery_runtime_seconds": 0.01,
+                "stopped_reason": "accepted_limit_reached",
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "leads.db"
+            init_db(db_path)
+            report = run_campaign(
+                {
+                    "storage": {"google_sheet_id": "sheet-123"},
+                    "campaign": {"minimum_score_for_draft": 75, "daily_draft_limit": 10, "daily_discovery_limit": 1},
+                    "sender": {"name": "Zaigham Ali", "offer": "Offer"},
+                },
+                db_path,
+                mode="discover",
+                dry_run=True,
+            )
+
+        self.assertGreater(report["discovered_persist_failed_count"], 0)
+        self.assertGreaterEqual(report["lead_queue_rows_written"], 1)
+        self.assertEqual(report["drafts_created"], 0)
+
+    @patch("amazon_lead_agent.runtime.get_storage_router")
+    @patch("amazon_lead_agent.runtime.run_outreach", return_value=[])
     @patch("amazon_lead_agent.runtime.run_scoring", return_value=[])
     @patch("amazon_lead_agent.runtime.run_extraction", return_value=[])
     @patch("amazon_lead_agent.runtime.run_discovery")

@@ -17,6 +17,27 @@ from amazon_lead_agent.tools.storage_router import get_storage_router
 LOGGER = logging.getLogger(__name__)
 
 
+def _storage_mode_label(storage: Any) -> str:
+    mode = str(getattr(storage, "mode", "") or "").strip().lower()
+    if mode:
+        return mode
+    if bool(getattr(storage, "uses_sheets", False)):
+        return "sheets"
+    if bool(getattr(storage, "uses_sqlite", False)):
+        return "sqlite"
+    return ""
+
+
+def _safe_commit(storage: Any, report: dict[str, Any], *, label: str) -> str:
+    try:
+        storage.commit()
+        return "ok"
+    except Exception as exc:  # noqa: BLE001
+        report["errors"] += 1
+        LOGGER.warning("%s storage flush failed: %s", label, exc)
+        return f"failed: {exc}"
+
+
 def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_run: bool = False) -> dict[str, Any]:
     storage = get_storage_router(config, db_path)
     report: dict[str, Any] = {
@@ -56,6 +77,11 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
         "discovered_count_by_category": {},
         "cleaned_redirect_count": 0,
         "rejected_redirect_count": 0,
+        "discovered_persisted_count": 0,
+        "discovered_persist_failed_count": 0,
+        "lead_queue_rows_written": 0,
+        "storage_flush_status": "pending",
+        "storage_mode_used": _storage_mode_label(storage),
         "llm_provider_counts": {},
         "llm_model_counts": {},
         "extraction_method_counts": {},
@@ -77,6 +103,7 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
             discovered = discovery_result.get("leads", [])
             search_stats = discovery_result.get("search_stats", {})
             report["discovered_count"] = len(discovered)
+            report["storage_mode_used"] = _storage_mode_label(storage) or report["storage_mode_used"]
             report["search_provider_counts"] = search_stats.get("provider_counts", {})
             report["provider_blocked_counts"] = search_stats.get("provider_blocked_counts", search_stats.get("blocked_query_counts", {}))
             report["queries_attempted_by_provider"] = search_stats.get("queries_attempted_by_provider", search_stats.get("provider_counts", {}))
@@ -102,6 +129,25 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
             report["discovered_count_by_category"] = search_stats.get("discovered_count_by_category", {})
             report["cleaned_redirect_count"] = int(search_stats.get("cleaned_redirect_count", 0))
             report["rejected_redirect_count"] = int(search_stats.get("rejected_redirect_count", 0))
+
+            pre_failed_rows = len(getattr(storage, "failed_sheet_rows", []))
+            persist_failed = 0
+            for lead in discovered:
+                try:
+                    storage.upsert_lead(lead, tab="Lead Queue")
+                except Exception as exc:  # noqa: BLE001
+                    persist_failed += 1
+                    LOGGER.warning(
+                        "failed to persist discovered lead id=%s website=%s: %s",
+                        lead.get("id", ""),
+                        lead.get("website", ""),
+                        exc,
+                    )
+            row_failures_delta = max(0, len(getattr(storage, "failed_sheet_rows", [])) - pre_failed_rows)
+            report["lead_queue_rows_written"] += len(discovered)
+            report["discovered_persist_failed_count"] += max(persist_failed, row_failures_delta)
+            report["discovered_persisted_count"] += max(0, len(discovered) - max(persist_failed, row_failures_delta))
+            report["storage_flush_status"] = _safe_commit(storage, report, label="discovery")
 
         if mode in {"full", "enrich"}:
             enriched = run_extraction(config, storage)
@@ -150,7 +196,6 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
         if mode in {"full", "draft"}:
             drafted = run_outreach(config, storage, dry_run=dry_run)
             report["drafts_created"] = len([lead for lead in drafted if lead.get("draft_id")])
-
     except Exception as exc:  # noqa: BLE001
         fatal_error = exc
         report["run_error"] = str(exc)
@@ -193,6 +238,11 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
                 "discovered_count_by_category": report["discovered_count_by_category"],
                 "cleaned_redirect_count": report["cleaned_redirect_count"],
                 "rejected_redirect_count": report["rejected_redirect_count"],
+                "discovered_persisted_count": report["discovered_persisted_count"],
+                "discovered_persist_failed_count": report["discovered_persist_failed_count"],
+                "lead_queue_rows_written": report["lead_queue_rows_written"],
+                "storage_flush_status": report["storage_flush_status"],
+                "storage_mode_used": report["storage_mode_used"],
                 "extraction_method_counts": report["extraction_method_counts"],
                 "llm_provider_counts": report["llm_provider_counts"],
                 "llm_model_counts": report["llm_model_counts"],
@@ -250,6 +300,11 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
                     "discovered_count_by_category": report["discovered_count_by_category"],
                     "cleaned_redirect_count": report["cleaned_redirect_count"],
                     "rejected_redirect_count": report["rejected_redirect_count"],
+                    "discovered_persisted_count": report["discovered_persisted_count"],
+                    "discovered_persist_failed_count": report["discovered_persist_failed_count"],
+                    "lead_queue_rows_written": report["lead_queue_rows_written"],
+                    "storage_flush_status": report["storage_flush_status"],
+                    "storage_mode_used": report["storage_mode_used"],
                     "extraction_method_counts": report["extraction_method_counts"],
                     "llm_provider_counts": report["llm_provider_counts"],
                     "llm_model_counts": report["llm_model_counts"],
@@ -268,7 +323,10 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
         report["failed_sheet_reads"] = snapshot.get("failed_sheet_reads", report["failed_sheet_reads"])
         report["sheet_flush_errors"] = snapshot.get("sheet_flush_errors", report["sheet_flush_errors"])
         report["sheet_mirror_status"] = "enabled" if snapshot.get("uses_sheets") else "disabled"
-        storage.commit()
+        if report["storage_flush_status"] == "pending":
+            report["storage_flush_status"] = _safe_commit(storage, report, label="final")
+        else:
+            _safe_commit(storage, report, label="final")
         storage.close()
     if fatal_error:
         raise fatal_error
