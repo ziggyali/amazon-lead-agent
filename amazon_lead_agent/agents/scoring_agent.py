@@ -112,6 +112,14 @@ def classify_scored_lead(lead: dict, min_score_for_draft: int) -> dict:
     score = int(lead.get("score") or 0)
     has_email = bool((lead.get("public_emails") or []))
     has_contact_page = bool(lead.get("contact_page_url"))
+    if str(lead.get("extraction_method") or "").strip().lower() == "blocked_or_error":
+        return {
+            "status": "rejected",
+            "review_status": "rejected",
+            "send_status": "not_eligible",
+            "email_status": "unknown",
+            "lead_type": "lead",
+        }
     if score >= min_score_for_draft and has_email and lead.get("tier") in {"A", "B"}:
         return {
             "status": "approved",
@@ -146,7 +154,7 @@ def classify_scored_lead(lead: dict, min_score_for_draft: int) -> dict:
 
 
 def _storage(config: dict, storage_or_path: Path | StorageRouter) -> StorageRouter:
-    if isinstance(storage_or_path, StorageRouter):
+    if isinstance(storage_or_path, StorageRouter) or hasattr(storage_or_path, "upsert_lead"):
         return storage_or_path
     return get_storage_router(config, storage_or_path)
 

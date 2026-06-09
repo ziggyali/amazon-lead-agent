@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from amazon_lead_agent.tools.sheet_store import SheetStore
 from amazon_lead_agent.tools.storage_router import StorageRouter, get_storage_router
 
 
@@ -53,6 +54,15 @@ class StorageRouterTests(unittest.TestCase):
             self.assertTrue(router.uses_sqlite)
             self.assertEqual(router.mode, "sqlite")
             router.close()
+
+    @patch("amazon_lead_agent.tools.google_sheets.append_or_update_lead")
+    def test_sheet_store_batches_writes_until_commit(self, mock_append_lead) -> None:
+        store = SheetStore("sheet-123")
+        lead = {"id": "lead-1", "company_name": "Acme", "website": "https://example.com", "status": "discovered"}
+        store.upsert_lead(lead)
+        self.assertEqual(mock_append_lead.call_count, 0)
+        store.commit()
+        self.assertEqual(mock_append_lead.call_count, 1)
 
 
 if __name__ == "__main__":

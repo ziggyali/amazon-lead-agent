@@ -41,6 +41,10 @@ class SheetStore:
     _lead_index: dict[str, dict[str, Any]] = field(default_factory=dict)
     _domain_index: dict[str, str] = field(default_factory=dict)
     _dirty_tabs: set[str] = field(default_factory=set)
+    _pending_leads: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
+    _pending_events: list[dict[str, Any]] = field(default_factory=list)
+    _pending_reports: list[dict[str, Any]] = field(default_factory=list)
+    flush_errors: list[dict[str, Any]] = field(default_factory=list)
 
     def warm_tabs(self, tabs: list[str] | tuple[str, ...] | None = None) -> None:
         for tab in tabs or (*LEAD_TABS, *REPORT_TABS):
@@ -81,6 +85,20 @@ class SheetStore:
         self._index_row(tab, row)
         self._dirty_tabs.add(tab)
 
+    def _queue_lead(self, tab: str, row: dict[str, Any]) -> None:
+        lead_id = _lead_key(row)
+        queue = self._pending_leads.setdefault(tab, {})
+        if lead_id:
+            queue[lead_id] = dict(row)
+        else:
+            queue[f"{len(queue)}-{tab}"] = dict(row)
+
+    def _queue_event(self, event: dict[str, Any]) -> None:
+        self._pending_events.append(dict(event))
+
+    def _queue_report(self, report: dict[str, Any]) -> None:
+        self._pending_reports.append(dict(report))
+
     def get_all_leads(self) -> list[dict[str, Any]]:
         merged: dict[str, dict[str, Any]] = {}
         for tab in LEAD_TABS:
@@ -111,25 +129,24 @@ class SheetStore:
             payload["id"] = make_lead_id(str(company_name), str(website), str(source))
         if not payload.get("updated_at"):
             payload["updated_at"] = _utc_now()
-        google_sheets.append_or_update_lead(self.sheet_id, canonical, payload)
         self._remember_row(canonical, payload)
+        self._queue_lead(canonical, payload)
         status = str(payload.get("status") or "").strip().lower()
         if canonical != "Lead Queue":
-            google_sheets.append_or_update_lead(self.sheet_id, "Lead Queue", payload)
             self._remember_row("Lead Queue", payload)
+            self._queue_lead("Lead Queue", payload)
         if status == "approved":
-            google_sheets.append_or_update_lead(self.sheet_id, "Approved Leads", payload)
             self._remember_row("Approved Leads", payload)
+            self._queue_lead("Approved Leads", payload)
         elif status == "contact_form_queue":
-            google_sheets.append_or_update_lead(self.sheet_id, "Contact Form Queue", payload)
             self._remember_row("Contact Form Queue", payload)
+            self._queue_lead("Contact Form Queue", payload)
         elif status == "rejected":
-            google_sheets.append_or_update_lead(self.sheet_id, "Rejected Leads", payload)
             self._remember_row("Rejected Leads", payload)
+            self._queue_lead("Rejected Leads", payload)
         return str(payload.get("id") or "")
 
     def record_outreach_event(self, event: dict[str, Any]) -> None:
-        google_sheets.append_outreach_log(self.sheet_id, event)
         self._remember_row(
             "Outreach Log",
             {
@@ -141,10 +158,11 @@ class SheetStore:
                 "created_at": event.get("created_at", _utc_now()),
             },
         )
+        self._queue_event(event)
 
     def append_daily_report(self, report: dict[str, Any]) -> None:
-        google_sheets.append_daily_report(self.sheet_id, report)
         self._remember_row("Daily Reports", report)
+        self._queue_report(report)
 
     def mark_draft_created(self, lead_id: str, draft_id: str) -> None:
         lead = self.get_lead(lead_id) or {"id": lead_id}
@@ -175,6 +193,7 @@ class SheetStore:
             for lead in self.get_all_leads()
             if int(lead.get("drafted") or 0) == 0
             and int(lead.get("score") or 0) >= min_score
+            and str(lead.get("extraction_method") or "").strip().lower() != "blocked_or_error"
             and bool(lead.get("has_email") or lead.get("public_emails"))
             and bool(lead.get("contact_path_exists") or lead.get("contact_page_url"))
             and bool(lead.get("amazon_backlink_found") or lead.get("amazon_links"))
@@ -183,8 +202,65 @@ class SheetStore:
         leads.sort(key=lambda item: (-int(item.get("score") or 0), str(item.get("updated_at") or item.get("created_at") or "")))
         return leads[:limit]
 
+    def _write_with_backoff(self, writer, *, label: str) -> None:
+        delay = 0.5
+        for attempt in range(5):
+            try:
+                writer()
+                return
+            except Exception as exc:  # noqa: BLE001
+                status = getattr(getattr(exc, "resp", None), "status", None) or getattr(exc, "status_code", None)
+                status_code = int(status) if status is not None else None
+                if status_code in {429, 500, 502, 503, 504} and attempt < 4:
+                    LOGGER.info("sheet write retry label=%s attempt=%s status=%s", label, attempt + 1, status)
+                    import random
+                    import time
+
+                    time.sleep(delay + random.random() * 0.25)
+                    delay *= 2
+                    continue
+                raise
+
+    def flush(self) -> None:
+        if not self.sheet_id:
+            return
+        for tab, rows in list(self._pending_leads.items()):
+            for row in list(rows.values()):
+                try:
+                    self._write_with_backoff(
+                        lambda row=row, tab=tab: google_sheets.append_or_update_lead(self.sheet_id, tab, row),
+                        label=f"{tab}:lead",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    context = {"tab": tab, "kind": "lead", "error": str(exc), "lead_id": _lead_key(row)}
+                    self.flush_errors.append(context)
+                    LOGGER.warning("sheet flush failed: %s", context)
+        for event in list(self._pending_events):
+            try:
+                self._write_with_backoff(
+                    lambda event=event: google_sheets.append_outreach_log(self.sheet_id, event),
+                    label="Outreach Log:event",
+                )
+            except Exception as exc:  # noqa: BLE001
+                context = {"tab": "Outreach Log", "kind": "event", "error": str(exc), "lead_id": str(event.get("lead_id", ""))}
+                self.flush_errors.append(context)
+                LOGGER.warning("sheet flush failed: %s", context)
+        for report in list(self._pending_reports):
+            try:
+                self._write_with_backoff(
+                    lambda report=report: google_sheets.append_daily_report(self.sheet_id, report),
+                    label="Daily Reports:report",
+                )
+            except Exception as exc:  # noqa: BLE001
+                context = {"tab": "Daily Reports", "kind": "report", "error": str(exc)}
+                self.flush_errors.append(context)
+                LOGGER.warning("sheet flush failed: %s", context)
+        self._pending_leads.clear()
+        self._pending_events.clear()
+        self._pending_reports.clear()
+
     def commit(self) -> None:
-        # Sheets writes are immediate; cache remains in-memory.
+        self.flush()
         return None
 
     def close(self) -> None:

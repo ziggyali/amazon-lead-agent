@@ -327,6 +327,7 @@ def get_leads_for_drafting(conn: sqlite3.Connection, min_score: int, limit: int)
         """
         SELECT * FROM leads
         WHERE drafted = 0
+          AND COALESCE(LOWER(extraction_method), '') != 'blocked_or_error'
           AND score >= ?
           AND has_email = 1
           AND contact_path_exists = 1

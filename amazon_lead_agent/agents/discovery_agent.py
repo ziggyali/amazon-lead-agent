@@ -29,8 +29,19 @@ def _candidate_from_result(result: dict[str, str], category: str) -> dict[str, o
     }
 
 
+def _should_reject_candidate(lead: dict[str, object]) -> bool:
+    company_name = str(lead.get("company_name") or lead.get("brand_name") or "").strip().lower()
+    normalized_company = normalize_company_name(company_name)
+    if company_name == "available" or normalized_company == "available":
+        return True
+    website = str(lead.get("website") or "").strip().lower()
+    if any(keyword in website for keyword in ("dictionary", "reference", "marketplace", "video", "news", "listicle", "wiki", "youtube", "vimeo", "dailymotion")):
+        return True
+    return False
+
+
 def _storage(config: dict, storage_or_path: Path | StorageRouter) -> StorageRouter:
-    if isinstance(storage_or_path, StorageRouter):
+    if isinstance(storage_or_path, StorageRouter) or hasattr(storage_or_path, "upsert_lead"):
         return storage_or_path
     return get_storage_router(config, storage_or_path)
 
@@ -44,6 +55,8 @@ def run_discovery(config: dict, db_path: Path | StorageRouter) -> dict:
         results = discover_candidates(categories, limit)
         for result in results:
             lead = _candidate_from_result(result, result.get("category", ""))
+            if _should_reject_candidate(lead):
+                continue
             lead_id = storage.upsert_lead(lead, tab="Lead Queue")
             storage.record_outreach_event(
                 {

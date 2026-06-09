@@ -24,7 +24,18 @@ class ScoringClassificationTests(unittest.TestCase):
         outcome = classify_scored_lead(lead, 75)
         self.assertEqual(outcome["status"], "approved")
 
+    def test_blocked_or_error_never_becomes_approved(self) -> None:
+        lead = {
+            "score": 95,
+            "tier": "A",
+            "public_emails": ["hello@example.com"],
+            "contact_page_url": "https://example.com/contact",
+            "extraction_method": "blocked_or_error",
+        }
+        outcome = classify_scored_lead(lead, 75)
+        self.assertEqual(outcome["status"], "rejected")
+        self.assertEqual(outcome["send_status"], "not_eligible")
+
 
 if __name__ == "__main__":
     unittest.main()
-

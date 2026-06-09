@@ -32,6 +32,19 @@ CONTENT_DOMAIN_BLOCKLIST = {
     "goodhousekeeping.com",
 }
 
+CONTENT_DOMAIN_KEYWORDS = (
+    "dictionary",
+    "reference",
+    "marketplace",
+    "video",
+    "news",
+    "listicle",
+    "wiki",
+    "youtube",
+    "vimeo",
+    "dailymotion",
+)
+
 CONTENT_TITLE_KEYWORDS = ("best", "top", "award winners", "list", "review")
 AGENCY_DOMAIN_KEYWORDS = ("agency", "marketing", "consulting", "services", "service", "pr")
 PREFERRED_PATH_HINTS = ("/pages/where-to-buy", "/retailers", "/amazon", "/store-locator", "/contact", "/about")
@@ -369,6 +382,8 @@ def _is_rejectable_content_result(result: dict) -> bool:
     if not domain:
         return True
     if domain in CONTENT_DOMAIN_BLOCKLIST:
+        return True
+    if any(keyword in domain for keyword in CONTENT_DOMAIN_KEYWORDS):
         return True
     title = (result.get("title") or "").lower()
     url = result.get("url") or ""

@@ -46,6 +46,7 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
         "extraction_method_counts": {},
         "sheet_mirror_error_count": 0,
         "failed_sheet_rows": [],
+        "sheet_flush_errors": [],
         "sheet_mirror_status": "enabled" if storage.uses_sheets else "disabled",
         "top_5_leads": [],
     }
@@ -131,6 +132,7 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
                 "sheet_mirror_status": report["sheet_mirror_status"],
                 "sheet_mirror_error_count": report["sheet_mirror_error_count"],
                 "failed_sheet_rows": report["failed_sheet_rows"],
+                "sheet_flush_errors": report["sheet_flush_errors"],
                 "search_provider_counts": report["search_provider_counts"],
                 "provider_blocked_counts": report["provider_blocked_counts"],
                 "queries_attempted_by_provider": report["queries_attempted_by_provider"],
@@ -168,6 +170,7 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
                     "sheet_mirror_status": report["sheet_mirror_status"],
                     "sheet_mirror_error_count": report["sheet_mirror_error_count"],
                     "failed_sheet_rows": report["failed_sheet_rows"],
+                    "sheet_flush_errors": report["sheet_flush_errors"],
                     "search_provider_counts": report["search_provider_counts"],
                     "provider_blocked_counts": report["provider_blocked_counts"],
                     "queries_attempted_by_provider": report["queries_attempted_by_provider"],
@@ -187,6 +190,7 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
         snapshot = storage.snapshot()
         report["sheet_mirror_error_count"] = int(snapshot.get("sheet_mirror_error_count", report["sheet_mirror_error_count"]))
         report["failed_sheet_rows"] = snapshot.get("failed_sheet_rows", report["failed_sheet_rows"])
+        report["sheet_flush_errors"] = snapshot.get("sheet_flush_errors", report["sheet_flush_errors"])
         report["sheet_mirror_status"] = "enabled" if snapshot.get("uses_sheets") else "disabled"
         storage.commit()
         storage.close()

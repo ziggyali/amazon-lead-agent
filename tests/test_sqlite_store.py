@@ -48,6 +48,35 @@ class SQLiteStoreTests(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_blocked_or_error_is_not_draft_eligible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "leads.db"
+            init_db(db_path)
+            conn = get_connection(db_path)
+            try:
+                upsert_lead(
+                    conn,
+                    {
+                        "id": "lead-2",
+                        "company_name": "Acme",
+                        "website": "https://example.com",
+                        "category": "beauty",
+                        "amazon_backlink_found": True,
+                        "public_emails": ["hello@example.com"],
+                        "contact_page_url": "https://example.com/contact",
+                        "score": 95,
+                        "tier": "A",
+                        "status": "approved",
+                        "extraction_method": "blocked_or_error",
+                        "source_urls": ["https://example.com"],
+                    },
+                )
+                conn.commit()
+                rows = get_leads_for_drafting(conn, min_score=75, limit=10)
+                self.assertEqual(rows, [])
+            finally:
+                conn.close()
+
     def test_record_outreach_event_updates_daily_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "leads.db"

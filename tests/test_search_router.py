@@ -53,6 +53,23 @@ class SearchRouterTests(unittest.TestCase):
         self.assertEqual(stats["rejected_content_domain_count"], 1)
         self.assertEqual(stats["rejected_listicle_domains_count"], 1)
 
+    def test_dictionary_news_marketplace_domains_are_rejected(self) -> None:
+        rejected_result = {
+            "title": "Brand Example",
+            "url": "https://news.example.com/article",
+            "snippet": "directory entry",
+        }
+        accepted_result = {
+            "title": "Brand Example",
+            "url": "https://brand.example.com/retailers",
+            "snippet": "official site",
+        }
+        with patch("amazon_lead_agent.tools.search.generate_queries", return_value=["q"]), patch("amazon_lead_agent.tools.search.search_web", return_value=[rejected_result, accepted_result]):
+            results = discover_candidates(["beauty"], limit=5)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["url"], "https://brand.example.com/retailers")
+
+
 
 if __name__ == "__main__":
     unittest.main()

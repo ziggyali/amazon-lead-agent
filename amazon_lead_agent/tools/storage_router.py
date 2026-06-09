@@ -238,9 +238,17 @@ class StorageRouter:
         }
         if self._sheet_store:
             snapshot["sheet_store"] = self._sheet_store.snapshot()
+            snapshot["sheet_flush_errors"] = list(getattr(self._sheet_store, "flush_errors", []))
         return snapshot
 
     def commit(self) -> None:
+        if self._sheet_store:
+            try:
+                self._sheet_store.commit()
+            except Exception as exc:  # noqa: BLE001
+                self._record_sheet_error(exc, tab="flush", action="commit")
+                if self._is_fatal_sheet_error(exc):
+                    raise
         if self._sqlite_conn:
             self._sqlite_conn.commit()
 

@@ -7,7 +7,7 @@ from amazon_lead_agent.tools.storage_router import StorageRouter, get_storage_ro
 
 
 def _storage(config: dict, storage_or_path: Path | StorageRouter) -> StorageRouter:
-    if isinstance(storage_or_path, StorageRouter):
+    if isinstance(storage_or_path, StorageRouter) or hasattr(storage_or_path, "upsert_lead"):
         return storage_or_path
     return get_storage_router(config, storage_or_path)
 

@@ -4,8 +4,8 @@ import argparse
 import json
 from pathlib import Path
 import sqlite3
-from urllib.parse import urlparse
 
+from amazon_lead_agent.normalization import normalize_domain
 from amazon_lead_agent.tools.search import clean_search_result_url
 from amazon_lead_agent.tools.sqlite_store import get_connection, init_db, upsert_lead
 
@@ -24,6 +24,7 @@ CONTENT_DOMAIN_BLOCKLIST = {
 }
 
 LISTICLE_TITLE_KEYWORDS = ("best", "top", "award winners", "list", "review")
+DOMAIN_KEYWORDS = ("dictionary", "reference", "marketplace", "video", "news", "listicle", "wiki", "youtube", "vimeo", "dailymotion")
 
 
 def _normalize_path(path: str) -> str:
@@ -45,7 +46,7 @@ def _lead_domains(lead: sqlite3.Row) -> list[str]:
         pass
     domains: list[str] = []
     for value in values:
-        domains.append((urlparse(value).netloc or "").lower())
+        domains.append(normalize_domain(value))
     return domains
 
 
@@ -64,8 +65,12 @@ def _classify_lead(lead: sqlite3.Row) -> dict[str, str] | None:
         return {"status": "rejected", "review_status": "rejected", "send_status": "not_eligible", "reason": "bing redirect website"}
     if any(domain in CONTENT_DOMAIN_BLOCKLIST for domain in domains):
         return {"status": "rejected", "review_status": "rejected", "send_status": "not_eligible", "reason": "content/listicle domain"}
+    if any(any(keyword in domain for keyword in DOMAIN_KEYWORDS) for domain in domains):
+        return {"status": "rejected", "review_status": "rejected", "send_status": "not_eligible", "reason": "blocked domain keyword"}
     if any(keyword in title for keyword in LISTICLE_TITLE_KEYWORDS) and not any(domain and domain not in CONTENT_DOMAIN_BLOCKLIST for domain in domains):
         return {"status": "rejected", "review_status": "rejected", "send_status": "not_eligible", "reason": "listicle title"}
+    if str(lead["company_name"] or lead["brand_name"] or "").strip().lower() == "available":
+        return {"status": "rejected", "review_status": "rejected", "send_status": "not_eligible", "reason": "available company name"}
 
     extraction_method = str(lead["extraction_method"] or "").strip().lower()
     score = int(lead["score"] or 0)

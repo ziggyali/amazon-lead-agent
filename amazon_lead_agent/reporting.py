@@ -69,6 +69,7 @@ def write_campaign_report(db_path: str | Path | None, output_path: str | Path = 
             f"- sheet_mirror_status: {report.get('sheet_mirror_status', notes.get('sheet_mirror_status', ''))}",
             f"- sheet_mirror_error_count: {report.get('sheet_mirror_error_count', notes.get('sheet_mirror_error_count', 0))}",
             f"- failed_sheet_rows: {json.dumps(report.get('failed_sheet_rows', notes.get('failed_sheet_rows', [])), ensure_ascii=False)}",
+            f"- sheet_flush_errors: {json.dumps(report.get('sheet_flush_errors', notes.get('sheet_flush_errors', [])), ensure_ascii=False)}",
             f"- search_provider_counts: {json.dumps(report.get('search_provider_counts', notes.get('search_provider_counts', {})), sort_keys=True)}",
             f"- provider_blocked_counts: {json.dumps(report.get('provider_blocked_counts', notes.get('provider_blocked_counts', {})), sort_keys=True)}",
             f"- queries_attempted_by_provider: {json.dumps(report.get('queries_attempted_by_provider', notes.get('queries_attempted_by_provider', {})), sort_keys=True)}",

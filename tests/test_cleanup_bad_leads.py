@@ -46,6 +46,38 @@ class CleanupBadLeadsTests(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_www_blocked_domain_is_caught(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "leads.db"
+            init_db(db_path)
+            conn = get_connection(db_path)
+            try:
+                upsert_lead(
+                    conn,
+                    {
+                        "id": "lead-2",
+                        "company_name": "Blocked Domain",
+                        "website": "https://www.popsugar.com/article",
+                        "score": 10,
+                        "tier": "Reject",
+                        "status": "approved",
+                        "review_status": "approved",
+                        "send_status": "pending",
+                        "amazon_backlink_found": False,
+                        "public_emails": [],
+                        "contact_page_url": "",
+                        "extraction_method": "scrapegraphai_other",
+                    },
+                )
+                conn.commit()
+                actions = find_cleanup_actions(conn)
+                self.assertEqual(len(actions), 1)
+                self.assertEqual(actions[0]["id"], "lead-2")
+                self.assertEqual(actions[0]["status"], "rejected")
+                self.assertEqual(actions[0]["reason"], "content/listicle domain")
+            finally:
+                conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()
