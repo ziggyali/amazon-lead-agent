@@ -16,6 +16,7 @@ def _candidate_from_result(result: dict[str, str], category: str) -> dict[str, o
     company = title.split("|")[0].strip() or website
     source_url = result.get("source_url") or website
     snippet = result.get("snippet") or ""
+    status_hint = str(result.get("status_hint") or "").strip().lower()
     return {
         "id": make_lead_id(company, website, source_url),
         "company_name": company,
@@ -27,7 +28,8 @@ def _candidate_from_result(result: dict[str, str], category: str) -> dict[str, o
         "source_urls": [source_url] if source_url else [],
         "amazon_evidence_summary": snippet if contains_amazon_buying_signal(snippet) else "",
         "amazon_backlink_found": int(contains_amazon_buying_signal(snippet)),
-        "status": "discovered",
+        "status": status_hint if status_hint in {"needs_enrichment", "discovered"} else "discovered",
+        "status_hint": status_hint,
     }
 
 
@@ -43,6 +45,9 @@ def _hard_reject_candidate(lead: dict[str, object]) -> bool:
 
 
 def _candidate_status(lead: dict[str, object]) -> str:
+    status_hint = str(lead.get("status_hint") or "").strip().lower()
+    if status_hint in {"needs_enrichment", "discovered"}:
+        return status_hint
     website = str(lead.get("website") or "").strip()
     title = str(lead.get("company_name") or lead.get("brand_name") or "")
     snippet = str(lead.get("amazon_evidence_summary") or "")
@@ -78,7 +83,7 @@ def run_discovery(config: dict, db_path: Path | StorageRouter) -> dict:
     try:
         categories = config["campaign"]["categories"]
         limit = int(config["campaign"]["daily_discovery_limit"])
-        results = discover_candidates(categories, limit)
+        results = discover_candidates(categories, limit, config=config)
         for result in results:
             lead = _candidate_from_result(result, result.get("category", ""))
             if _hard_reject_candidate(lead):

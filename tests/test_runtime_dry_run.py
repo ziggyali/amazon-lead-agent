@@ -137,6 +137,10 @@ class DryRunTests(unittest.TestCase):
                         "rejected_likely_brand_filter_count": 2,
                         "rejected_due_to_no_amazon_evidence_count": 0,
                         "discovered_count_by_category": {"beauty": 1},
+                        "query_budget_used": 2,
+                        "query_budget_remaining": 14,
+                        "discovery_runtime_seconds": 1.25,
+                        "stopped_reason": "accepted_limit_reached",
                     },
                 }
 
@@ -221,6 +225,9 @@ class DryRunTests(unittest.TestCase):
             self.assertEqual(report["soft_pass_needs_enrichment_count"], 1)
             self.assertEqual(report["rejected_likely_brand_filter_count"], 2)
             self.assertEqual(report["discovered_count_by_category"], {"beauty": 1})
+            self.assertEqual(report["query_budget_used"], 2)
+            self.assertEqual(report["query_budget_remaining"], 14)
+            self.assertEqual(report["stopped_reason"], "accepted_limit_reached")
 
     @patch("amazon_lead_agent.runtime.get_storage_router")
     @patch("amazon_lead_agent.runtime.run_outreach", return_value=[])

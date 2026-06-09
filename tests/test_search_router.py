@@ -45,8 +45,9 @@ class SearchRouterTests(unittest.TestCase):
             "url": "https://brand.example.com/pages/where-to-buy",
             "snippet": "official site",
         }
-        with patch("amazon_lead_agent.tools.search.generate_queries", return_value=["q"]), patch("amazon_lead_agent.tools.search.search_web", return_value=[article_result, brand_result]):
-            results = discover_candidates(["beauty"], limit=5)
+        with patch.dict("os.environ", {"DISCOVERY_MODE": "search"}, clear=False):
+            with patch("amazon_lead_agent.tools.search.generate_queries", return_value=[{"query": "q", "category": "beauty"}]), patch("amazon_lead_agent.tools.search._search_web_with_provider", return_value=([article_result, brand_result], "duckduckgo", "ok")):
+                results = discover_candidates(["beauty"], limit=5)
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["url"], "https://brand.example.com/pages/where-to-buy")
         stats = get_last_search_stats()
@@ -64,8 +65,9 @@ class SearchRouterTests(unittest.TestCase):
             "url": "https://brand.example.com/retailers",
             "snippet": "official site",
         }
-        with patch("amazon_lead_agent.tools.search.generate_queries", return_value=["q"]), patch("amazon_lead_agent.tools.search.search_web", return_value=[rejected_result, accepted_result]):
-            results = discover_candidates(["beauty"], limit=5)
+        with patch.dict("os.environ", {"DISCOVERY_MODE": "search"}, clear=False):
+            with patch("amazon_lead_agent.tools.search.generate_queries", return_value=[{"query": "q", "category": "beauty"}]), patch("amazon_lead_agent.tools.search._search_web_with_provider", return_value=([rejected_result, accepted_result], "duckduckgo", "ok")):
+                results = discover_candidates(["beauty"], limit=5)
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["url"], "https://brand.example.com/retailers")
 

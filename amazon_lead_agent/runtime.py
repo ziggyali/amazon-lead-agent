@@ -36,6 +36,10 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
         "queries_attempted_by_provider": {},
         "search_blocked_query_counts": {},
         "search_rate_limited_query_counts": {},
+        "query_budget_used": 0,
+        "query_budget_remaining": 0,
+        "discovery_runtime_seconds": 0.0,
+        "stopped_reason": "",
         "rejected_content_domains_count": 0,
         "rejected_content_domain_count": 0,
         "rejected_listicle_domains_count": 0,
@@ -72,6 +76,10 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
             report["queries_attempted_by_provider"] = search_stats.get("queries_attempted_by_provider", search_stats.get("provider_counts", {}))
             report["search_blocked_query_counts"] = search_stats.get("blocked_query_counts", {})
             report["search_rate_limited_query_counts"] = search_stats.get("rate_limited_query_counts", {})
+            report["query_budget_used"] = int(search_stats.get("query_budget_used", 0))
+            report["query_budget_remaining"] = int(search_stats.get("query_budget_remaining", 0))
+            report["discovery_runtime_seconds"] = float(search_stats.get("discovery_runtime_seconds", 0.0))
+            report["stopped_reason"] = str(search_stats.get("stopped_reason", ""))
             report["rejected_content_domains_count"] = int(search_stats.get("rejected_content_domain_count", 0))
             report["rejected_content_domain_count"] = int(search_stats.get("rejected_content_domain_count", 0))
             report["rejected_listicle_domains_count"] = int(search_stats.get("rejected_listicle_domains_count", 0))
@@ -154,6 +162,10 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
                 "search_provider_counts": report["search_provider_counts"],
                 "provider_blocked_counts": report["provider_blocked_counts"],
                 "queries_attempted_by_provider": report["queries_attempted_by_provider"],
+                "query_budget_used": report["query_budget_used"],
+                "query_budget_remaining": report["query_budget_remaining"],
+                "discovery_runtime_seconds": report["discovery_runtime_seconds"],
+                "stopped_reason": report["stopped_reason"],
                 "rejected_content_domain_count": report["rejected_content_domain_count"],
                 "rejected_content_domains_count": report["rejected_content_domains_count"],
                 "hard_rejected_junk_count": report["hard_rejected_junk_count"],
@@ -201,6 +213,10 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
                     "search_provider_counts": report["search_provider_counts"],
                     "provider_blocked_counts": report["provider_blocked_counts"],
                     "queries_attempted_by_provider": report["queries_attempted_by_provider"],
+                    "query_budget_used": report["query_budget_used"],
+                    "query_budget_remaining": report["query_budget_remaining"],
+                    "discovery_runtime_seconds": report["discovery_runtime_seconds"],
+                    "stopped_reason": report["stopped_reason"],
                     "rejected_content_domain_count": report["rejected_content_domain_count"],
                     "rejected_content_domains_count": report["rejected_content_domains_count"],
                     "hard_rejected_junk_count": report["hard_rejected_junk_count"],

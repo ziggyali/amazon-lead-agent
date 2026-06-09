@@ -4,12 +4,14 @@ from collections import defaultdict
 from copy import deepcopy
 from html import unescape
 from html.parser import HTMLParser
+import json
 import logging
 import os
 import base64
 import re
 import time
-from urllib.parse import parse_qs, quote_plus, unquote, urlparse, urlunparse
+from pathlib import Path
+from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse, urlunparse
 
 import requests
 
@@ -28,22 +30,59 @@ from amazon_lead_agent.lead_filters import (
 
 LOGGER = logging.getLogger(__name__)
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AmazonLeadAgent/0.1"
+DISCOVERY_DEBUG_PATH = Path("logs/discovery_debug.jsonl")
+DEFAULT_MAX_SEARCH_QUERIES_PER_RUN = 16
+DEFAULT_MAX_SEARCH_QUERIES_PER_CATEGORY = 4
+DEFAULT_MAX_RESULTS_PER_QUERY = 10
+DEFAULT_MAX_DISCOVERY_RUNTIME_SECONDS = 300
 
 CONTENT_DOMAIN_BLOCKLIST = BLOCKED_ROOT_DOMAINS
 CONTENT_DOMAIN_KEYWORDS = BLOCKED_DOMAIN_KEYWORDS
 CONTENT_TITLE_KEYWORDS = BLOCKED_TITLE_KEYWORDS
 AGENCY_DOMAIN_KEYWORDS = ("agency", "marketing", "consulting", "services", "service", "pr")
 
-QUERY_TEMPLATES = [
-    '"available on Amazon" "{category}" brand',
-    '"shop our Amazon store" "{category}"',
-    '"buy on Amazon" "{category}" "official site"',
-    '"Amazon storefront" "{category}" brand',
-    '"where to buy" "{category}" "Amazon"',
-    '"retailers" "{category}" "Amazon"',
-    'site:*.com "available on Amazon" "{category}"',
-    'site:*.com "shop on Amazon" "{category}"',
-]
+QUERY_TEMPLATES: dict[str, list[str]] = {
+    "beauty": [
+        '"available on Amazon" "skincare" "official"',
+        '"buy on Amazon" "skincare" "official site"',
+        '"Amazon storefront" "skincare brand"',
+        '"where to buy" "skincare" "Amazon"',
+        'inurl:where-to-buy skincare Amazon',
+        'inurl:retailers skincare Amazon',
+        'inurl:stockists skincare Amazon',
+    ],
+    "pet": [
+        '"available on Amazon" "pet supplies" "official"',
+        '"buy on Amazon" "dog treats" "official site"',
+        '"Amazon storefront" "pet brand"',
+        '"where to buy" "pet supplies" "Amazon"',
+        'inurl:where-to-buy pet Amazon',
+        'inurl:retailers pet Amazon',
+    ],
+    "home": [
+        '"available on Amazon" "home goods" "official"',
+        '"buy on Amazon" "home decor" "official site"',
+        '"Amazon storefront" "home brand"',
+        '"where to buy" "home goods" "Amazon"',
+        'inurl:where-to-buy home Amazon',
+        'inurl:retailers home Amazon',
+    ],
+    "supplements": [
+        '"available on Amazon" "supplements" "official"',
+        '"buy on Amazon" "vitamins" "official site"',
+        '"Amazon storefront" "supplement brand"',
+        '"where to buy" "supplements" "Amazon"',
+        'inurl:where-to-buy supplements Amazon',
+        'inurl:retailers supplements Amazon',
+    ],
+}
+
+SEED_SITE_FILES = {
+    "beauty": Path("data/seeds/beauty_seed_sites.txt"),
+    "pet": Path("data/seeds/pet_seed_sites.txt"),
+    "home": Path("data/seeds/home_seed_sites.txt"),
+    "supplements": Path("data/seeds/supplements_seed_sites.txt"),
+}
 
 TRACKING_DOMAINS = {
     "bing.com",
@@ -60,7 +99,12 @@ _LAST_SEARCH_STATS: dict = {}
 def _new_stats() -> dict:
     return {
         "search_provider_mode": os.environ.get("SEARCH_PROVIDER", "multi").strip().lower() or "multi",
+        "discovery_mode": os.environ.get("DISCOVERY_MODE", "hybrid").strip().lower() or "hybrid",
         "queries_total": 0,
+        "query_budget_used": 0,
+        "query_budget_remaining": 0,
+        "discovery_runtime_seconds": 0.0,
+        "stopped_reason": "",
         "queries_attempted_by_provider": defaultdict(int),
         "provider_counts": defaultdict(int),
         "provider_blocked_counts": defaultdict(int),
@@ -100,6 +144,87 @@ def _stat_inc(name: str, provider: str, amount: int = 1) -> None:
     if not _LAST_SEARCH_STATS:
         reset_search_stats()
     _LAST_SEARCH_STATS[name][provider] += amount
+
+
+def _config_section(config: dict | None) -> dict[str, object]:
+    if not isinstance(config, dict):
+        return {}
+    merged: dict[str, object] = {}
+    for key in ("discovery", "campaign"):
+        section = config.get(key, {})
+        if isinstance(section, dict):
+            merged.update(section)
+    return merged
+
+
+def _env_or_config_text(config: dict | None, env_name: str, config_keys: tuple[str, ...], default: str) -> str:
+    raw = os.environ.get(env_name, "").strip()
+    if raw:
+        return raw
+    section = _config_section(config)
+    for key in config_keys:
+        value = section.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return default
+
+
+def _env_or_config_int(config: dict | None, env_name: str, config_keys: tuple[str, ...], default: int) -> int:
+    raw = os.environ.get(env_name, "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            LOGGER.info("invalid %s=%s, using default=%s", env_name, raw, default)
+    section = _config_section(config)
+    for key in config_keys:
+        value = section.get(key)
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return default
+
+
+def _discovery_mode(config: dict | None = None) -> str:
+    return _env_or_config_text(config, "DISCOVERY_MODE", ("discovery_mode", "mode"), "hybrid").lower()
+
+
+def _discovery_limits(config: dict | None = None) -> dict[str, int]:
+    return {
+        "max_search_queries_per_run": _env_or_config_int(config, "MAX_SEARCH_QUERIES_PER_RUN", ("max_search_queries_per_run",), DEFAULT_MAX_SEARCH_QUERIES_PER_RUN),
+        "max_search_queries_per_category": _env_or_config_int(config, "MAX_SEARCH_QUERIES_PER_CATEGORY", ("max_search_queries_per_category",), DEFAULT_MAX_SEARCH_QUERIES_PER_CATEGORY),
+        "max_results_per_query": _env_or_config_int(config, "MAX_RESULTS_PER_QUERY", ("max_results_per_query",), DEFAULT_MAX_RESULTS_PER_QUERY),
+        "max_discovery_runtime_seconds": _env_or_config_int(config, "MAX_DISCOVERY_RUNTIME_SECONDS", ("max_discovery_runtime_seconds",), DEFAULT_MAX_DISCOVERY_RUNTIME_SECONDS),
+    }
+
+
+def _seed_file_for_category(category: str) -> Path | None:
+    return SEED_SITE_FILES.get(category.strip().lower())
+
+
+def _read_seed_sites(category: str) -> list[str]:
+    path = _seed_file_for_category(category)
+    if not path or not path.exists():
+        return []
+    seeds: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        seeds.append(stripped)
+    return seeds
+
+
+def _query_items_for_category(category: str) -> list[dict[str, str]]:
+    templates = QUERY_TEMPLATES.get(category.strip().lower(), [])
+    return [{"category": category.strip().lower(), "query": template} for template in templates]
+
+
+def _seed_items_for_category(category: str) -> list[dict[str, str]]:
+    return [{"category": category.strip().lower(), "query": seed_url, "source_url": seed_url, "provider": "seeded", "kind": "seed"} for seed_url in _read_seed_sites(category)]
 
 
 def _search_provider_order() -> list[str]:
@@ -329,13 +454,15 @@ def _search_with_playwright(provider: str, query: str, limit: int = 10) -> tuple
     return results, "ok"
 
 
-def search_web(query: str, limit: int = 10, provider: str | None = None) -> list[dict]:
+def _search_web_with_provider(query: str, limit: int = 10, provider: str | None = None) -> tuple[list[dict], str | None, str]:
     providers = [provider] if provider else _search_provider_order()
+    last_provider = provider or ""
     for current in providers:
         if not current:
             continue
         _stat_inc("queries_attempted_by_provider", current)
         _stat_inc("provider_counts", current)
+        last_provider = current
         try:
             if current == "playwright_search":
                 results, status = _search_with_playwright(current, query, limit)
@@ -348,18 +475,22 @@ def search_web(query: str, limit: int = 10, provider: str | None = None) -> list
             time.sleep(0.5)
             continue
         if results:
-            return results
-    return []
+            return results, current, "ok"
+    return [], last_provider, "empty"
 
 
-def generate_queries(categories: list[str]) -> list[str]:
-    queries: list[str] = []
+def search_web(query: str, limit: int = 10, provider: str | None = None) -> list[dict]:
+    results, _, _ = _search_web_with_provider(query, limit=limit, provider=provider)
+    return results
+
+
+def generate_queries(categories: list[str]) -> list[dict[str, str]]:
+    queries: list[dict[str, str]] = []
     for category in categories:
         category = category.strip().lower()
         if not category:
             continue
-        for template in QUERY_TEMPLATES:
-            queries.append(template.format(category=category))
+        queries.extend(_query_items_for_category(category))
     return queries
 
 
@@ -408,43 +539,488 @@ def _result_score(result: dict) -> int:
     return score
 
 
-def discover_candidates(categories: list[str], limit: int = 50) -> list[dict]:
+class _AnchorLinkParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: list[dict[str, str]] = []
+        self._current_href: str = ""
+        self._current_text: list[str] = []
+        self._in_anchor = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "a":
+            return
+        attr_map = {key.lower(): (value or "") for key, value in attrs}
+        href = attr_map.get("href", "")
+        if not href:
+            return
+        self._current_href = href
+        self._current_text = []
+        self._in_anchor = True
+
+    def handle_data(self, data: str) -> None:
+        if self._in_anchor:
+            text = data.strip()
+            if text:
+                self._current_text.append(text)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() != "a" or not self._in_anchor:
+            return
+        self.links.append({"href": self._current_href, "text": " ".join(self._current_text).strip()})
+        self._current_href = ""
+        self._current_text = []
+        self._in_anchor = False
+
+
+def _append_discovery_debug(entry: dict[str, object]) -> None:
+    try:
+        debug_path = Path.cwd() / DISCOVERY_DEBUG_PATH
+        debug_path.parent.mkdir(parents=True, exist_ok=True)
+        with debug_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.info("failed to write discovery debug entry: %s", exc)
+
+
+def _fetch_public_page(url: str) -> str:
+    response = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=20)
+    if response.status_code != 200:
+        return ""
+    return response.text or ""
+
+
+def _extract_links_from_html(html: str, base_url: str) -> list[dict[str, str]]:
+    parser = _AnchorLinkParser()
+    parser.feed(html or "")
+    extracted: list[dict[str, str]] = []
+    for item in parser.links:
+        href = item.get("href", "")
+        absolute = href if urlparse(href).scheme else urljoin(base_url, href)
+        cleaned = clean_search_result_url(absolute)
+        if not cleaned:
+            continue
+        extracted.append({"url": cleaned, "title": item.get("text", ""), "snippet": ""})
+    return extracted
+
+
+def _normalize_query_item(item: object, default_category: str = "") -> dict[str, str]:
+    if isinstance(item, dict):
+        query = str(item.get("query") or item.get("q") or "").strip()
+        category = str(item.get("category") or default_category or "").strip().lower()
+        provider = str(item.get("provider") or "").strip().lower()
+        kind = str(item.get("kind") or "search").strip().lower()
+        source_url = str(item.get("source_url") or "").strip()
+        return {"query": query, "category": category, "provider": provider, "kind": kind, "source_url": source_url}
+    query = str(item or "").strip()
+    return {"query": query, "category": default_category.strip().lower(), "provider": "", "kind": "search", "source_url": ""}
+
+
+def _brand_candidate_from_url(url: str, title: str, snippet: str, category: str, source_url: str, raw_url: str | None = None) -> dict[str, str]:
+    cleaned_url = clean_search_result_url(url)
+    return {
+        "url": cleaned_url or url,
+        "raw_url": raw_url or source_url or url,
+        "source_url": source_url or raw_url or url,
+        "title": title,
+        "snippet": snippet,
+        "category": category,
+        "extracted_brand_domain": cleaned_url or url,
+    }
+
+
+def _expand_official_brand_domains_from_page(page_url: str, category: str, source_url: str, title: str = "", snippet: str = "") -> list[dict[str, str]]:
+    html = _fetch_public_page(page_url)
+    if not html:
+        return []
+    links = _extract_links_from_html(html, page_url)
+    candidates: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for link in links:
+        link_url = link.get("url", "")
+        if not link_url:
+            continue
+        domain = normalize_domain(link_url)
+        if not domain or domain in seen:
+            continue
+        if is_hard_junk_result(link_url, link.get("title", ""), link.get("snippet", ""), category):
+            continue
+        if is_likely_brand_domain(link_url, link.get("title", ""), link.get("snippet", ""), category) or is_soft_brand_candidate(link_url, link.get("title", ""), link.get("snippet", ""), category):
+            seen.add(domain)
+            candidates.append(_brand_candidate_from_url(link_url, link.get("title", ""), link.get("snippet", ""), category, source_url, raw_url=page_url))
+    return candidates
+
+
+def discover_candidates(categories: list[str], limit: int = 50, config: dict | None = None) -> list[dict]:
     reset_search_stats()
-    queries = generate_queries(categories)
+    limits = _discovery_limits(config)
+    mode = _discovery_mode(config)
+    _LAST_SEARCH_STATS["discovery_mode"] = mode
+    start = time.monotonic()
     candidates: list[dict] = []
     seen_domains: set[str] = set()
-    for query in queries:
+    per_category_query_counts: defaultdict[str, int] = defaultdict(int)
+    query_plan: list[dict[str, str]] = []
+    normalized_categories = [category.strip().lower() for category in categories if str(category).strip()]
+    for category in normalized_categories:
+        if mode in {"seeded", "hybrid"}:
+            query_plan.extend(_seed_items_for_category(category))
+        if mode in {"search", "hybrid"}:
+            query_plan.extend(generate_queries([category]))
+
+    stopped_reason = "exhausted_sources"
+
+    for item in query_plan:
+        if len(candidates) >= limit:
+            stopped_reason = "accepted_limit_reached"
+            break
+        elapsed = time.monotonic() - start
+        if elapsed >= limits["max_discovery_runtime_seconds"]:
+            stopped_reason = "runtime_budget_exhausted"
+            break
+        if _LAST_SEARCH_STATS["query_budget_used"] >= limits["max_search_queries_per_run"]:
+            stopped_reason = "query_budget_exhausted"
+            break
+
+        query_data = _normalize_query_item(item, default_category=normalized_categories[0] if len(normalized_categories) == 1 else "")
+        query = query_data["query"]
+        category = query_data["category"] or (normalized_categories[0] if len(normalized_categories) == 1 else "")
+        kind = query_data["kind"]
+        if not query or not category:
+            continue
+        if per_category_query_counts[category] >= limits["max_search_queries_per_category"]:
+            continue
+
+        per_category_query_counts[category] += 1
         _LAST_SEARCH_STATS["queries_total"] += 1
-        provider_results = search_web(query, limit=limit)
+        _LAST_SEARCH_STATS["query_budget_used"] += 1
+        _LAST_SEARCH_STATS["query_budget_remaining"] = max(0, limits["max_search_queries_per_run"] - int(_LAST_SEARCH_STATS["query_budget_used"]))
+
+        query_provider = query_data["provider"] or None
+        raw_provider = query_provider or "multi"
+        provider_results: list[dict] = []
+        provider_used = raw_provider
+        if kind == "seed":
+            provider_results = [{"url": query, "title": "", "snippet": "", "source_url": query, "raw_url": query, "provider": "seeded"}]
+            provider_used = "seeded"
+        else:
+            provider_results, provider_used, _ = _search_web_with_provider(query, limit=limits["max_results_per_query"], provider=query_provider or None)
+
         sorted_results = sorted(provider_results, key=_result_score, reverse=True)
         for result in sorted_results:
-            if _is_rejectable_content_result(result):
-                _LAST_SEARCH_STATS["rejected_content_domain_count"] += 1
-                if any(keyword in (result.get("title") or "").lower() for keyword in CONTENT_TITLE_KEYWORDS):
-                    _LAST_SEARCH_STATS["rejected_listicle_domains_count"] += 1
-                continue
+            if len(candidates) >= limit:
+                stopped_reason = "accepted_limit_reached"
+                break
             raw_url = result.get("raw_url") or result.get("url") or ""
             cleaned_url = clean_search_result_url(raw_url or result.get("url") or "")
+            title = result.get("title") or ""
+            snippet = result.get("snippet") or ""
+            decision = "rejected"
+            reason = ""
+            extracted_brand_domain = ""
+            if kind == "seed":
+                expanded_candidates = _expand_official_brand_domains_from_page(raw_url, category, source_url=query, title=title, snippet=snippet)
+                if not expanded_candidates:
+                    reason = "seed_page_no_brand_domain"
+                    _append_discovery_debug(
+                        {
+                            "query": query,
+                            "provider": provider_used,
+                            "category": category,
+                            "raw_url": raw_url,
+                            "cleaned_url": cleaned_url,
+                            "title": title,
+                            "snippet": snippet,
+                            "decision": decision,
+                            "reason": reason,
+                            "extracted_brand_domain": "",
+                        }
+                    )
+                    continue
+                for candidate in expanded_candidates:
+                    if len(candidates) >= limit:
+                        stopped_reason = "accepted_limit_reached"
+                        break
+                    candidate_url = candidate.get("url") or ""
+                    domain = normalize_domain(candidate_url)
+                    if not domain or domain in seen_domains:
+                        continue
+                    candidate_company = normalize_company_name(candidate.get("title") or domain)
+                    if is_junk_company_name(candidate_company):
+                        _LAST_SEARCH_STATS["hard_rejected_junk_count"] += 1
+                        _append_discovery_debug(
+                            {
+                                "query": query,
+                                "provider": provider_used,
+                                "category": category,
+                                "raw_url": raw_url,
+                                "cleaned_url": candidate_url,
+                                "title": candidate.get("title") or title,
+                                "snippet": candidate.get("snippet") or snippet,
+                                "decision": "rejected",
+                                "reason": "junk_company_name",
+                                "extracted_brand_domain": candidate_url,
+                            }
+                        )
+                        continue
+                    candidate.update(
+                        {
+                            "category": category,
+                            "company_name": candidate_company,
+                            "brand_name": candidate_company,
+                            "normalized_company_name": normalize_company_name(candidate_company),
+                            "search_query": query,
+                            "provider": provider_used,
+                            "status_hint": "needs_enrichment",
+                        }
+                    )
+                    seen_domains.add(domain)
+                    candidates.append(candidate)
+                    decision = "soft_pass"
+                    reason = "seed_expanded_official_brand_domain"
+                    extracted_brand_domain = candidate_url
+                    _LAST_SEARCH_STATS["soft_pass_needs_enrichment_count"] += 1
+                    _append_discovery_debug(
+                        {
+                            "query": query,
+                            "provider": provider_used,
+                            "category": category,
+                            "raw_url": raw_url,
+                            "cleaned_url": candidate_url,
+                            "title": candidate.get("title") or title,
+                            "snippet": candidate.get("snippet") or snippet,
+                            "decision": decision,
+                            "reason": reason,
+                            "extracted_brand_domain": extracted_brand_domain,
+                        }
+                    )
+                continue
+
+            if _is_rejectable_content_result(result):
+                _LAST_SEARCH_STATS["rejected_content_domain_count"] += 1
+                if any(keyword in (title or "").lower() for keyword in CONTENT_TITLE_KEYWORDS):
+                    _LAST_SEARCH_STATS["rejected_listicle_domains_count"] += 1
+                _append_discovery_debug(
+                    {
+                        "query": query,
+                        "provider": provider_used,
+                        "category": category,
+                        "raw_url": raw_url,
+                        "cleaned_url": cleaned_url,
+                        "title": title,
+                        "snippet": snippet,
+                        "decision": "rejected",
+                        "reason": "hard_junk_result",
+                        "extracted_brand_domain": "",
+                    }
+                )
+                continue
+
             if raw_url and cleaned_url and cleaned_url != raw_url:
                 _LAST_SEARCH_STATS["cleaned_redirect_count"] += 1
             if raw_url and not cleaned_url:
                 _LAST_SEARCH_STATS["rejected_redirect_count"] += 1
+                _append_discovery_debug(
+                    {
+                        "query": query,
+                        "provider": provider_used,
+                        "category": category,
+                        "raw_url": raw_url,
+                        "cleaned_url": "",
+                        "title": title,
+                        "snippet": snippet,
+                        "decision": "rejected",
+                        "reason": "unresolvable_redirect",
+                        "extracted_brand_domain": "",
+                    }
+                )
                 continue
-            result["url"] = cleaned_url or result.get("url") or ""
-            domain = normalize_domain(result.get("url"))
+
+            final_url = cleaned_url or result.get("url") or ""
+            domain = normalize_domain(final_url)
             if not domain or domain in seen_domains:
                 continue
-            category = next((category for category in categories if category.lower() in query.lower()), "")
-            if not is_likely_brand_domain(result.get("url"), result.get("title"), result.get("snippet"), category):
-                _LAST_SEARCH_STATS["rejected_likely_brand_filter_count"] += 1
-            seen_domains.add(domain)
-            result["category"] = category
-            result["company_name"] = normalize_company_name(result.get("title") or domain)
-            if is_junk_company_name(result["company_name"]):
-                _LAST_SEARCH_STATS["rejected_content_domain_count"] += 1
+
+            if is_likely_brand_domain(final_url, title, snippet, category):
+                decision = "accepted"
+                reason = "brand_domain"
+                candidate = dict(result)
+                candidate.update(
+                    {
+                        "url": final_url,
+                        "raw_url": raw_url or final_url,
+                        "source_url": result.get("source_url") or raw_url or final_url,
+                        "category": category,
+                        "company_name": normalize_company_name(title or domain),
+                        "normalized_company_name": normalize_company_name(title or domain),
+                        "search_query": query,
+                        "provider": provider_used,
+                    }
+                )
+                if is_junk_company_name(candidate["company_name"]):
+                    _LAST_SEARCH_STATS["hard_rejected_junk_count"] += 1
+                    _append_discovery_debug(
+                        {
+                            "query": query,
+                            "provider": provider_used,
+                            "category": category,
+                            "raw_url": raw_url,
+                            "cleaned_url": final_url,
+                            "title": title,
+                            "snippet": snippet,
+                            "decision": "rejected",
+                            "reason": "junk_company_name",
+                            "extracted_brand_domain": "",
+                        }
+                    )
+                    continue
+                seen_domains.add(domain)
+                candidates.append(candidate)
+                _append_discovery_debug(
+                    {
+                        "query": query,
+                        "provider": provider_used,
+                        "category": category,
+                        "raw_url": raw_url,
+                        "cleaned_url": final_url,
+                        "title": title,
+                        "snippet": snippet,
+                        "decision": decision,
+                        "reason": reason,
+                        "extracted_brand_domain": "",
+                    }
+                )
                 continue
-            result["search_query"] = query
-            candidates.append(result)
-            if len(candidates) >= limit:
-                return candidates
+
+            if is_soft_brand_candidate(final_url, title, snippet, category):
+                decision = "soft_pass"
+                reason = "brand_like_domain"
+                candidate = dict(result)
+                candidate.update(
+                    {
+                        "url": final_url,
+                        "raw_url": raw_url or final_url,
+                        "source_url": result.get("source_url") or raw_url or final_url,
+                        "category": category,
+                        "company_name": normalize_company_name(title or domain),
+                        "normalized_company_name": normalize_company_name(title or domain),
+                        "search_query": query,
+                        "provider": provider_used,
+                        "status_hint": "needs_enrichment",
+                    }
+                )
+                if is_junk_company_name(candidate["company_name"]):
+                    _LAST_SEARCH_STATS["hard_rejected_junk_count"] += 1
+                    _append_discovery_debug(
+                        {
+                            "query": query,
+                            "provider": provider_used,
+                            "category": category,
+                            "raw_url": raw_url,
+                            "cleaned_url": final_url,
+                            "title": title,
+                            "snippet": snippet,
+                            "decision": "rejected",
+                            "reason": "junk_company_name",
+                            "extracted_brand_domain": "",
+                        }
+                    )
+                    continue
+                seen_domains.add(domain)
+                candidates.append(candidate)
+                _LAST_SEARCH_STATS["soft_pass_needs_enrichment_count"] += 1
+                _LAST_SEARCH_STATS["rejected_likely_brand_filter_count"] += 1
+                _append_discovery_debug(
+                    {
+                        "query": query,
+                        "provider": provider_used,
+                        "category": category,
+                        "raw_url": raw_url,
+                        "cleaned_url": final_url,
+                        "title": title,
+                        "snippet": snippet,
+                        "decision": decision,
+                        "reason": reason,
+                        "extracted_brand_domain": "",
+                    }
+                )
+                continue
+
+            expanded_candidates = _expand_official_brand_domains_from_page(final_url, category, source_url=raw_url or final_url, title=title, snippet=snippet)
+            if expanded_candidates:
+                for candidate in expanded_candidates:
+                    if len(candidates) >= limit:
+                        stopped_reason = "accepted_limit_reached"
+                        break
+                    candidate_url = candidate.get("url") or ""
+                    candidate_domain = normalize_domain(candidate_url)
+                    if not candidate_domain or candidate_domain in seen_domains:
+                        continue
+                    candidate_company = normalize_company_name(candidate.get("title") or candidate_domain)
+                    if is_junk_company_name(candidate_company):
+                        _LAST_SEARCH_STATS["hard_rejected_junk_count"] += 1
+                        _append_discovery_debug(
+                            {
+                                "query": query,
+                                "provider": provider_used,
+                                "category": category,
+                                "raw_url": raw_url,
+                                "cleaned_url": candidate_url,
+                                "title": candidate.get("title") or title,
+                                "snippet": candidate.get("snippet") or snippet,
+                                "decision": "rejected",
+                                "reason": "junk_company_name",
+                                "extracted_brand_domain": candidate_url,
+                            }
+                        )
+                        continue
+                    candidate.update(
+                        {
+                            "category": category,
+                            "company_name": candidate_company,
+                            "brand_name": candidate_company,
+                            "normalized_company_name": normalize_company_name(candidate_company),
+                            "search_query": query,
+                            "provider": provider_used,
+                            "status_hint": "needs_enrichment",
+                        }
+                    )
+                    seen_domains.add(candidate_domain)
+                    candidates.append(candidate)
+                    _LAST_SEARCH_STATS["soft_pass_needs_enrichment_count"] += 1
+                    _append_discovery_debug(
+                        {
+                            "query": query,
+                            "provider": provider_used,
+                            "category": category,
+                            "raw_url": raw_url,
+                            "cleaned_url": candidate_url,
+                            "title": candidate.get("title") or title,
+                            "snippet": candidate.get("snippet") or snippet,
+                            "decision": "soft_pass",
+                            "reason": "expanded_official_brand_domain",
+                            "extracted_brand_domain": candidate_url,
+                        }
+                    )
+                continue
+
+            _LAST_SEARCH_STATS["rejected_likely_brand_filter_count"] += 1
+            _append_discovery_debug(
+                {
+                    "query": query,
+                    "provider": provider_used,
+                    "category": category,
+                    "raw_url": raw_url,
+                    "cleaned_url": final_url,
+                    "title": title,
+                    "snippet": snippet,
+                    "decision": "rejected",
+                    "reason": "no_official_brand_domain_found",
+                    "extracted_brand_domain": "",
+                }
+            )
+
+    _LAST_SEARCH_STATS["query_budget_remaining"] = max(0, limits["max_search_queries_per_run"] - int(_LAST_SEARCH_STATS["query_budget_used"]))
+    _LAST_SEARCH_STATS["discovery_runtime_seconds"] = round(time.monotonic() - start, 3)
+    _LAST_SEARCH_STATS["stopped_reason"] = stopped_reason
     return candidates

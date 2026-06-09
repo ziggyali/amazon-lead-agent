@@ -1,6 +1,8 @@
 .env
 config.yaml
-data/
+data/*
+!data/seeds/
+!data/seeds/*.txt
 logs/
 credentials/
 token.json
@@ -16,4 +18,5 @@ __pycache__/
 campaign_report.md
 minimax_benchmark.json
 *.pyc
+logs/discovery_debug.jsonl
 
