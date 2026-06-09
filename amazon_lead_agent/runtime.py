@@ -40,6 +40,12 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
         "query_budget_remaining": 0,
         "discovery_runtime_seconds": 0.0,
         "stopped_reason": "",
+        "seed_lines_processed": 0,
+        "seed_pages_fetched": 0,
+        "seed_brand_domains_extracted": 0,
+        "direct_seed_candidates": 0,
+        "seed_candidates_accepted": 0,
+        "seed_candidates_rejected": 0,
         "rejected_content_domains_count": 0,
         "rejected_content_domain_count": 0,
         "rejected_listicle_domains_count": 0,
@@ -80,6 +86,12 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
             report["query_budget_remaining"] = int(search_stats.get("query_budget_remaining", 0))
             report["discovery_runtime_seconds"] = float(search_stats.get("discovery_runtime_seconds", 0.0))
             report["stopped_reason"] = str(search_stats.get("stopped_reason", ""))
+            report["seed_lines_processed"] = int(search_stats.get("seed_lines_processed", 0))
+            report["seed_pages_fetched"] = int(search_stats.get("seed_pages_fetched", 0))
+            report["seed_brand_domains_extracted"] = int(search_stats.get("seed_brand_domains_extracted", 0))
+            report["direct_seed_candidates"] = int(search_stats.get("direct_seed_candidates", 0))
+            report["seed_candidates_accepted"] = int(search_stats.get("seed_candidates_accepted", 0))
+            report["seed_candidates_rejected"] = int(search_stats.get("seed_candidates_rejected", 0))
             report["rejected_content_domains_count"] = int(search_stats.get("rejected_content_domain_count", 0))
             report["rejected_content_domain_count"] = int(search_stats.get("rejected_content_domain_count", 0))
             report["rejected_listicle_domains_count"] = int(search_stats.get("rejected_listicle_domains_count", 0))
@@ -166,6 +178,12 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
                 "query_budget_remaining": report["query_budget_remaining"],
                 "discovery_runtime_seconds": report["discovery_runtime_seconds"],
                 "stopped_reason": report["stopped_reason"],
+                "seed_lines_processed": report["seed_lines_processed"],
+                "seed_pages_fetched": report["seed_pages_fetched"],
+                "seed_brand_domains_extracted": report["seed_brand_domains_extracted"],
+                "direct_seed_candidates": report["direct_seed_candidates"],
+                "seed_candidates_accepted": report["seed_candidates_accepted"],
+                "seed_candidates_rejected": report["seed_candidates_rejected"],
                 "rejected_content_domain_count": report["rejected_content_domain_count"],
                 "rejected_content_domains_count": report["rejected_content_domains_count"],
                 "hard_rejected_junk_count": report["hard_rejected_junk_count"],
@@ -217,6 +235,12 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
                     "query_budget_remaining": report["query_budget_remaining"],
                     "discovery_runtime_seconds": report["discovery_runtime_seconds"],
                     "stopped_reason": report["stopped_reason"],
+                    "seed_lines_processed": report["seed_lines_processed"],
+                    "seed_pages_fetched": report["seed_pages_fetched"],
+                    "seed_brand_domains_extracted": report["seed_brand_domains_extracted"],
+                    "direct_seed_candidates": report["direct_seed_candidates"],
+                    "seed_candidates_accepted": report["seed_candidates_accepted"],
+                    "seed_candidates_rejected": report["seed_candidates_rejected"],
                     "rejected_content_domain_count": report["rejected_content_domain_count"],
                     "rejected_content_domains_count": report["rejected_content_domains_count"],
                     "hard_rejected_junk_count": report["hard_rejected_junk_count"],

@@ -105,6 +105,12 @@ def _new_stats() -> dict:
         "query_budget_remaining": 0,
         "discovery_runtime_seconds": 0.0,
         "stopped_reason": "",
+        "seed_lines_processed": 0,
+        "seed_pages_fetched": 0,
+        "seed_brand_domains_extracted": 0,
+        "direct_seed_candidates": 0,
+        "seed_candidates_accepted": 0,
+        "seed_candidates_rejected": 0,
         "queries_attempted_by_provider": defaultdict(int),
         "provider_counts": defaultdict(int),
         "provider_blocked_counts": defaultdict(int),
@@ -205,16 +211,37 @@ def _seed_file_for_category(category: str) -> Path | None:
     return SEED_SITE_FILES.get(category.strip().lower())
 
 
-def _read_seed_sites(category: str) -> list[str]:
+def _parse_seed_line(line: str) -> dict[str, str] | None:
+    raw = unescape((line or "").strip())
+    if not raw or raw.startswith("#"):
+        return None
+    lowered = raw.lower()
+    kind = "direct"
+    for prefix in ("seed:", "list:", "directory:"):
+        if lowered.startswith(prefix):
+            kind = "page"
+            raw = raw.split(":", 1)[1].strip()
+            break
+    label = ""
+    if "|" in raw:
+        url_part, label_part = raw.split("|", 1)
+        raw = url_part.strip()
+        label = label_part.strip()
+    cleaned = clean_search_result_url(raw) or raw
+    if not cleaned:
+        return None
+    return {"kind": kind, "url": cleaned, "label": label}
+
+
+def _read_seed_sites(category: str) -> list[dict[str, str]]:
     path = _seed_file_for_category(category)
     if not path or not path.exists():
         return []
-    seeds: list[str] = []
+    seeds: list[dict[str, str]] = []
     for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        seeds.append(stripped)
+        parsed = _parse_seed_line(line)
+        if parsed:
+            seeds.append(parsed)
     return seeds
 
 
@@ -224,7 +251,19 @@ def _query_items_for_category(category: str) -> list[dict[str, str]]:
 
 
 def _seed_items_for_category(category: str) -> list[dict[str, str]]:
-    return [{"category": category.strip().lower(), "query": seed_url, "source_url": seed_url, "provider": "seeded", "kind": "seed"} for seed_url in _read_seed_sites(category)]
+    items: list[dict[str, str]] = []
+    for seed in _read_seed_sites(category):
+        items.append(
+            {
+                "category": category.strip().lower(),
+                "query": seed["url"],
+                "source_url": seed["url"],
+                "provider": "seeded",
+                "kind": seed["kind"],
+                "label": seed.get("label", ""),
+            }
+        )
+    return items
 
 
 def _search_provider_order() -> list[str]:
@@ -584,7 +623,11 @@ def _append_discovery_debug(entry: dict[str, object]) -> None:
 
 
 def _fetch_public_page(url: str) -> str:
-    response = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=20)
+    try:
+        response = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=20)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.info("seed page fetch failed url=%s error=%s", url, exc)
+        return ""
     if response.status_code != 200:
         return ""
     return response.text or ""
@@ -611,9 +654,22 @@ def _normalize_query_item(item: object, default_category: str = "") -> dict[str,
         provider = str(item.get("provider") or "").strip().lower()
         kind = str(item.get("kind") or "search").strip().lower()
         source_url = str(item.get("source_url") or "").strip()
-        return {"query": query, "category": category, "provider": provider, "kind": kind, "source_url": source_url}
+        label = str(item.get("label") or "").strip()
+        return {"query": query, "category": category, "provider": provider, "kind": kind, "source_url": source_url, "label": label}
     query = str(item or "").strip()
-    return {"query": query, "category": default_category.strip().lower(), "provider": "", "kind": "search", "source_url": ""}
+    return {"query": query, "category": default_category.strip().lower(), "provider": "", "kind": "search", "source_url": "", "label": ""}
+
+
+def _unique_nonempty(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        value = str(value or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
 
 
 def _brand_candidate_from_url(url: str, title: str, snippet: str, category: str, source_url: str, raw_url: str | None = None) -> dict[str, str]:
@@ -622,10 +678,33 @@ def _brand_candidate_from_url(url: str, title: str, snippet: str, category: str,
         "url": cleaned_url or url,
         "raw_url": raw_url or source_url or url,
         "source_url": source_url or raw_url or url,
+        "source_urls": _unique_nonempty([source_url or raw_url or url, cleaned_url or url]),
         "title": title,
         "snippet": snippet,
         "category": category,
         "extracted_brand_domain": cleaned_url or url,
+    }
+
+
+def _direct_seed_candidate(seed_url: str, label: str, category: str) -> dict[str, str]:
+    cleaned_url = clean_search_result_url(seed_url)
+    brand_url = cleaned_url or seed_url
+    domain = normalize_domain(brand_url)
+    company_name = normalize_company_name(label or domain or brand_url)
+    return {
+        "url": brand_url,
+        "raw_url": seed_url,
+        "source_url": seed_url,
+        "source_urls": _unique_nonempty([seed_url, brand_url]),
+        "title": label or company_name or domain or brand_url,
+        "snippet": "",
+        "category": category,
+        "company_name": company_name,
+        "brand_name": company_name,
+        "normalized_company_name": normalize_company_name(company_name),
+        "extracted_brand_domain": brand_url,
+        "status_hint": "needs_enrichment",
+        "seed_url": seed_url,
     }
 
 
@@ -644,10 +723,52 @@ def _expand_official_brand_domains_from_page(page_url: str, category: str, sourc
         if not domain or domain in seen:
             continue
         if is_hard_junk_result(link_url, link.get("title", ""), link.get("snippet", ""), category):
+            _LAST_SEARCH_STATS["seed_candidates_rejected"] += 1
+            _append_discovery_debug(
+                {
+                    "provider": "seeded",
+                    "category": category,
+                    "seed_url": source_url,
+                    "raw_url": page_url,
+                    "cleaned_url": link_url,
+                    "extracted_brand_domain": "",
+                    "title_or_anchor": link.get("title", "") or title,
+                    "decision": "rejected",
+                    "reason": "hard_junk_outbound_link",
+                }
+            )
             continue
         if is_likely_brand_domain(link_url, link.get("title", ""), link.get("snippet", ""), category) or is_soft_brand_candidate(link_url, link.get("title", ""), link.get("snippet", ""), category):
             seen.add(domain)
             candidates.append(_brand_candidate_from_url(link_url, link.get("title", ""), link.get("snippet", ""), category, source_url, raw_url=page_url))
+            _append_discovery_debug(
+                {
+                    "provider": "seeded",
+                    "category": category,
+                    "seed_url": source_url,
+                    "raw_url": page_url,
+                    "cleaned_url": link_url,
+                    "extracted_brand_domain": link_url,
+                    "title_or_anchor": link.get("title", "") or title,
+                    "decision": "accepted",
+                    "reason": "seed_page_expanded_brand_domain",
+                }
+            )
+        else:
+            _LAST_SEARCH_STATS["seed_candidates_rejected"] += 1
+            _append_discovery_debug(
+                {
+                    "provider": "seeded",
+                    "category": category,
+                    "seed_url": source_url,
+                    "raw_url": page_url,
+                    "cleaned_url": link_url,
+                    "extracted_brand_domain": "",
+                    "title_or_anchor": link.get("title", "") or title,
+                    "decision": "rejected",
+                    "reason": "seed_page_non_brand_link",
+                }
+            )
     return candidates
 
 
@@ -700,12 +821,144 @@ def discover_candidates(categories: list[str], limit: int = 50, config: dict | N
         raw_provider = query_provider or "multi"
         provider_results: list[dict] = []
         provider_used = raw_provider
-        if kind == "seed":
-            provider_results = [{"url": query, "title": "", "snippet": "", "source_url": query, "raw_url": query, "provider": "seeded"}]
-            provider_used = "seeded"
-        else:
-            provider_results, provider_used, _ = _search_web_with_provider(query, limit=limits["max_results_per_query"], provider=query_provider or None)
+        seed_label = query_data.get("label", "")
 
+        if kind == "direct":
+            _LAST_SEARCH_STATS["seed_lines_processed"] += 1
+            _LAST_SEARCH_STATS["direct_seed_candidates"] += 1
+            candidate = _direct_seed_candidate(query, seed_label, category)
+            candidate_url = candidate.get("url") or ""
+            domain = normalize_domain(candidate_url)
+            title_or_anchor = str(candidate.get("title") or seed_label or candidate_url)
+            if not domain or is_hard_junk_result(candidate_url, title_or_anchor, "", category) or is_junk_company_name(candidate.get("company_name")):
+                _LAST_SEARCH_STATS["seed_candidates_rejected"] += 1
+                _LAST_SEARCH_STATS["hard_rejected_junk_count"] += 1
+                _append_discovery_debug(
+                    {
+                        "provider": "seeded",
+                        "category": category,
+                        "seed_url": query,
+                        "raw_url": query,
+                        "cleaned_url": candidate_url,
+                        "extracted_brand_domain": "",
+                        "title_or_anchor": title_or_anchor,
+                        "decision": "rejected",
+                        "reason": "direct_seed_hard_junk",
+                    }
+                )
+                continue
+            if domain in seen_domains:
+                _LAST_SEARCH_STATS["seed_candidates_rejected"] += 1
+                _append_discovery_debug(
+                    {
+                        "provider": "seeded",
+                        "category": category,
+                        "seed_url": query,
+                        "raw_url": query,
+                        "cleaned_url": candidate_url,
+                        "extracted_brand_domain": candidate_url,
+                        "title_or_anchor": title_or_anchor,
+                        "decision": "rejected",
+                        "reason": "duplicate_seed_domain",
+                    }
+                )
+                continue
+            candidate.update(
+                {
+                    "provider": "seeded",
+                    "search_query": "",
+                    "status_hint": "needs_enrichment",
+                    "source_url": query,
+                    "source_urls": _unique_nonempty([query, candidate_url]),
+                }
+            )
+            seen_domains.add(domain)
+            candidates.append(candidate)
+            _LAST_SEARCH_STATS["soft_pass_needs_enrichment_count"] += 1
+            _LAST_SEARCH_STATS["seed_candidates_accepted"] += 1
+            _LAST_SEARCH_STATS["seed_lines_processed"] += 1
+            _LAST_SEARCH_STATS["seed_brand_domains_extracted"] += 1
+            _append_discovery_debug(
+                {
+                    "provider": "seeded",
+                    "category": category,
+                    "seed_url": query,
+                    "raw_url": query,
+                    "cleaned_url": candidate_url,
+                    "extracted_brand_domain": candidate_url,
+                    "title_or_anchor": title_or_anchor,
+                    "decision": "soft_pass",
+                    "reason": "direct_seed_brand_domain",
+                }
+            )
+            continue
+
+        if kind == "page":
+            _LAST_SEARCH_STATS["seed_lines_processed"] += 1
+            _LAST_SEARCH_STATS["seed_pages_fetched"] += 1
+            expanded_candidates = _expand_official_brand_domains_from_page(query, category, source_url=query, title=seed_label or "", snippet="")
+            if expanded_candidates:
+                _LAST_SEARCH_STATS["seed_brand_domains_extracted"] += len(expanded_candidates)
+                for candidate in expanded_candidates:
+                    if len(candidates) >= limit:
+                        stopped_reason = "accepted_limit_reached"
+                        break
+                    candidate_url = candidate.get("url") or ""
+                    domain = normalize_domain(candidate_url)
+                    if not domain or domain in seen_domains:
+                        _LAST_SEARCH_STATS["seed_candidates_rejected"] += 1
+                        continue
+                    candidate_company = normalize_company_name(candidate.get("title") or domain)
+                    if is_junk_company_name(candidate_company):
+                        _LAST_SEARCH_STATS["seed_candidates_rejected"] += 1
+                        _LAST_SEARCH_STATS["hard_rejected_junk_count"] += 1
+                        _append_discovery_debug(
+                            {
+                                "provider": "seeded",
+                                "category": category,
+                                "seed_url": query,
+                                "raw_url": query,
+                                "cleaned_url": candidate_url,
+                                "extracted_brand_domain": "",
+                                "title_or_anchor": candidate.get("title") or seed_label or candidate_url,
+                                "decision": "rejected",
+                                "reason": "seed_page_brand_company_junk",
+                            }
+                        )
+                        continue
+                    candidate.update(
+                        {
+                            "category": category,
+                            "company_name": candidate_company,
+                            "brand_name": candidate_company,
+                            "normalized_company_name": normalize_company_name(candidate_company),
+                            "search_query": query,
+                            "provider": "seeded",
+                            "status_hint": "needs_enrichment",
+                        }
+                    )
+                    seen_domains.add(domain)
+                    candidates.append(candidate)
+                    _LAST_SEARCH_STATS["soft_pass_needs_enrichment_count"] += 1
+                    _LAST_SEARCH_STATS["seed_candidates_accepted"] += 1
+                continue
+            _LAST_SEARCH_STATS["seed_candidates_rejected"] += 1
+            _append_discovery_debug(
+                {
+                    "provider": "seeded",
+                    "category": category,
+                    "seed_url": query,
+                    "raw_url": query,
+                    "cleaned_url": "",
+                    "extracted_brand_domain": "",
+                    "title_or_anchor": seed_label or query,
+                    "decision": "rejected",
+                    "reason": "seed_page_no_brand_domain",
+                }
+            )
+            continue
+
+        provider_results, provider_used, _ = _search_web_with_provider(query, limit=limits["max_results_per_query"], provider=query_provider or None)
         sorted_results = sorted(provider_results, key=_result_score, reverse=True)
         for result in sorted_results:
             if len(candidates) >= limit:
