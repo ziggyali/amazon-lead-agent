@@ -74,7 +74,38 @@ class CleanupBadLeadsTests(unittest.TestCase):
                 self.assertEqual(len(actions), 1)
                 self.assertEqual(actions[0]["id"], "lead-2")
                 self.assertEqual(actions[0]["status"], "rejected")
-                self.assertEqual(actions[0]["reason"], "content/listicle domain")
+                self.assertEqual(actions[0]["reason"], "blocked domain")
+            finally:
+                conn.close()
+
+    def test_available_definition_name_is_caught(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "leads.db"
+            init_db(db_path)
+            conn = get_connection(db_path)
+            try:
+                upsert_lead(
+                    conn,
+                    {
+                        "id": "lead-3",
+                        "company_name": "AVAILABLE Definition & Meaning",
+                        "website": "https://brand.example.com",
+                        "score": 5,
+                        "tier": "Reject",
+                        "status": "approved",
+                        "review_status": "approved",
+                        "send_status": "pending",
+                        "amazon_backlink_found": False,
+                        "public_emails": [],
+                        "contact_page_url": "",
+                        "extraction_method": "scrapegraphai_other",
+                    },
+                )
+                conn.commit()
+                actions = find_cleanup_actions(conn)
+                self.assertEqual(len(actions), 1)
+                self.assertEqual(actions[0]["status"], "rejected")
+                self.assertEqual(actions[0]["reason"], "available-like company name")
             finally:
                 conn.close()
 

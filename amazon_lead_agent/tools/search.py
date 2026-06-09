@@ -14,40 +14,24 @@ from urllib.parse import parse_qs, quote_plus, unquote, urlparse, urlunparse
 import requests
 
 from amazon_lead_agent.normalization import normalize_company_name, normalize_domain
+from amazon_lead_agent.lead_filters import (
+    BLOCKED_DOMAIN_KEYWORDS,
+    BLOCKED_ROOT_DOMAINS,
+    BLOCKED_TITLE_KEYWORDS,
+    PREFERRED_PATH_HINTS,
+    is_junk_company_name,
+    is_junk_or_blocked_result,
+    is_likely_brand_domain,
+)
 
 
 LOGGER = logging.getLogger(__name__)
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AmazonLeadAgent/0.1"
 
-CONTENT_DOMAIN_BLOCKLIST = {
-    "popsugar.com",
-    "glamour.com",
-    "womenshealthmag.com",
-    "headtopics.com",
-    "buzzfeed.com",
-    "instyle.com",
-    "marieclaire.com",
-    "people.com",
-    "today.com",
-    "goodhousekeeping.com",
-}
-
-CONTENT_DOMAIN_KEYWORDS = (
-    "dictionary",
-    "reference",
-    "marketplace",
-    "video",
-    "news",
-    "listicle",
-    "wiki",
-    "youtube",
-    "vimeo",
-    "dailymotion",
-)
-
-CONTENT_TITLE_KEYWORDS = ("best", "top", "award winners", "list", "review")
+CONTENT_DOMAIN_BLOCKLIST = BLOCKED_ROOT_DOMAINS
+CONTENT_DOMAIN_KEYWORDS = BLOCKED_DOMAIN_KEYWORDS
+CONTENT_TITLE_KEYWORDS = BLOCKED_TITLE_KEYWORDS
 AGENCY_DOMAIN_KEYWORDS = ("agency", "marketing", "consulting", "services", "service", "pr")
-PREFERRED_PATH_HINTS = ("/pages/where-to-buy", "/retailers", "/amazon", "/store-locator", "/contact", "/about")
 
 QUERY_TEMPLATES = [
     '"available on Amazon" "{category}" brand',
@@ -128,23 +112,28 @@ def clean_search_result_url(url: str) -> str:
     url = unescape(url).strip()
     parsed = urlparse(url)
     query = parse_qs(parsed.query)
-    candidate_keys = ("uddg", "u", "url", "r", "target", "q", "dest", "destination", "href")
+    candidate_keys = ("uddg", "u", "url", "r", "target", "q", "dest", "destination", "href", "p", "adurl", "targeturl", "redirect", "redir")
     candidate_values: list[str] = []
     for key in candidate_keys:
         candidate_values.extend(query.get(key, []))
     if parsed.fragment:
         candidate_values.extend(parse_qs(parsed.fragment).get("u", []))
     candidate_values.append(url)
+    tracking_domain = _is_tracking_or_search_domain(url)
     for candidate in candidate_values:
         resolved = _resolve_target_url(candidate)
         if resolved:
+            if _is_tracking_or_search_domain(resolved):
+                continue
             return resolved
+    if tracking_domain:
+        return ""
     if parsed.scheme in {"http", "https"}:
         final = urlunparse(parsed._replace(fragment=""))
         if _is_tracking_or_search_domain(final):
             return ""
         return final
-    return url
+    return ""
 
 
 def _is_tracking_or_search_domain(url: str) -> bool:
@@ -381,12 +370,11 @@ def _is_rejectable_content_result(result: dict) -> bool:
     domain = _result_domain(result)
     if not domain:
         return True
-    if domain in CONTENT_DOMAIN_BLOCKLIST:
-        return True
-    if any(keyword in domain for keyword in CONTENT_DOMAIN_KEYWORDS):
-        return True
     title = (result.get("title") or "").lower()
     url = result.get("url") or ""
+    snippet = (result.get("snippet") or "").lower()
+    if is_junk_or_blocked_result(url, title, snippet):
+        return True
     if any(keyword in title for keyword in CONTENT_TITLE_KEYWORDS) and not _has_preferred_path(url):
         return True
     if any(keyword in domain for keyword in AGENCY_DOMAIN_KEYWORDS) and not _has_preferred_path(url):
@@ -438,9 +426,15 @@ def discover_candidates(categories: list[str], limit: int = 50) -> list[dict]:
             domain = normalize_domain(result.get("url"))
             if not domain or domain in seen_domains:
                 continue
+            if not is_likely_brand_domain(result.get("url"), result.get("title"), result.get("snippet"), next((category for category in categories if category.lower() in query.lower()), "")):
+                _LAST_SEARCH_STATS["rejected_content_domain_count"] += 1
+                continue
             seen_domains.add(domain)
             result["category"] = next((category for category in categories if category.lower() in query.lower()), "")
             result["company_name"] = normalize_company_name(result.get("title") or domain)
+            if is_junk_company_name(result["company_name"]):
+                _LAST_SEARCH_STATS["rejected_content_domain_count"] += 1
+                continue
             result["search_query"] = query
             candidates.append(result)
             if len(candidates) >= limit:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from amazon_lead_agent.lead_filters import is_junk_company_name, is_junk_or_blocked_result, is_likely_brand_domain
 from amazon_lead_agent.normalization import make_lead_id, normalize_company_name
 from amazon_lead_agent.tools.amazon_backlink_discovery import contains_amazon_buying_signal
 from amazon_lead_agent.tools.search import discover_candidates, get_last_search_stats
@@ -32,10 +33,15 @@ def _candidate_from_result(result: dict[str, str], category: str) -> dict[str, o
 def _should_reject_candidate(lead: dict[str, object]) -> bool:
     company_name = str(lead.get("company_name") or lead.get("brand_name") or "").strip().lower()
     normalized_company = normalize_company_name(company_name)
-    if company_name == "available" or normalized_company == "available":
+    if is_junk_company_name(company_name) or normalized_company == "available":
         return True
     website = str(lead.get("website") or "").strip().lower()
-    if any(keyword in website for keyword in ("dictionary", "reference", "marketplace", "video", "news", "listicle", "wiki", "youtube", "vimeo", "dailymotion")):
+    title = str(lead.get("company_name") or lead.get("brand_name") or "")
+    snippet = str(lead.get("amazon_evidence_summary") or "")
+    category = str(lead.get("category") or "")
+    if is_junk_or_blocked_result(website, title, snippet, category):
+        return True
+    if not is_likely_brand_domain(website, title, snippet, category):
         return True
     return False
 

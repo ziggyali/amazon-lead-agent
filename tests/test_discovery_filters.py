@@ -44,6 +44,44 @@ class DiscoveryFilterTests(unittest.TestCase):
         self.assertEqual(storage.events, [])
         self.assertTrue(storage.closed)
 
+    @patch("amazon_lead_agent.agents.discovery_agent.discover_candidates")
+    @patch("amazon_lead_agent.agents.discovery_agent.get_last_search_stats", return_value={})
+    def test_available_definition_company_is_rejected_before_insertion(self, mock_stats, mock_discover) -> None:
+        mock_discover.return_value = [
+            {
+                "title": "AVAILABLE Definition & Meaning",
+                "url": "https://brand.example.com",
+                "source_url": "https://brand.example.com",
+                "snippet": "",
+            }
+        ]
+        storage = FakeStorage()
+        config = {"campaign": {"categories": ["beauty"], "daily_discovery_limit": 5}}
+        result = run_discovery(config, storage)
+        self.assertEqual(result["leads"], [])
+        self.assertEqual(storage.upserts, [])
+        self.assertEqual(storage.events, [])
+        self.assertTrue(storage.closed)
+
+    @patch("amazon_lead_agent.agents.discovery_agent.discover_candidates")
+    @patch("amazon_lead_agent.agents.discovery_agent.get_last_search_stats", return_value={})
+    def test_blocked_domain_is_rejected_before_insertion(self, mock_stats, mock_discover) -> None:
+        mock_discover.return_value = [
+            {
+                "title": "Popsugar Article",
+                "url": "https://www.sub.popsugar.com/article",
+                "source_url": "https://www.sub.popsugar.com/article",
+                "snippet": "news",
+            }
+        ]
+        storage = FakeStorage()
+        config = {"campaign": {"categories": ["beauty"], "daily_discovery_limit": 5}}
+        result = run_discovery(config, storage)
+        self.assertEqual(result["leads"], [])
+        self.assertEqual(storage.upserts, [])
+        self.assertEqual(storage.events, [])
+        self.assertTrue(storage.closed)
+
 
 if __name__ == "__main__":
     unittest.main()

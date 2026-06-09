@@ -41,6 +41,7 @@ Fill these values in `.env`:
 - `GMAIL_TOKEN_FILE`
 - `LLM_PROVIDER=minimax`
 - `LLM_FALLBACK_PROVIDERS=minimax,gemini`
+- `ENABLE_SCRAPEGRAPHAI=false` by default
 - `GEMINI_API_KEY` if you want Gemini as an optional provider
 - `OPENAI_API_KEY` only if you later add a real OpenAI API integration
 
@@ -138,6 +139,8 @@ Methods you may see:
 - `blocked_or_error`
 
 If ScrapeGraphAI is unavailable or fails, the direct MiniMax or fallback path is used and the note is written to the lead record.
+
+By default, ScrapeGraphAI is disabled entirely. Set `ENABLE_SCRAPEGRAPHAI=true` only if you want to test it explicitly.
 
 ## Google Sheet creation
 

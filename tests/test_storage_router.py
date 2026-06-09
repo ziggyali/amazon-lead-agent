@@ -64,6 +64,20 @@ class StorageRouterTests(unittest.TestCase):
         store.commit()
         self.assertEqual(mock_append_lead.call_count, 1)
 
+    def test_sheet_store_retries_connection_errors(self) -> None:
+        store = SheetStore("sheet-123")
+        attempts = {"count": 0}
+
+        def writer():
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise OSError(10060, "timed out")
+            return None
+
+        with patch("time.sleep", return_value=None):
+            store._write_with_backoff(writer, label="Lead Queue:lead")
+        self.assertEqual(attempts["count"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

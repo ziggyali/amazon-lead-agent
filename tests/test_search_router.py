@@ -29,7 +29,7 @@ class SearchRouterTests(unittest.TestCase):
 
     def test_bing_ck_a_url_is_decoded_or_rejected(self) -> None:
         encoded_target = "a1aHR0cHM6Ly9icmFuZC5leGFtcGxlLmNvbS9wYWdl"
-        bing_url = f"https://www.bing.com/ck/a?!&&p=abc123&u={encoded_target}&c=1&amp;foo=bar"
+        bing_url = f"https://www.bing.com/ck/a?!&&p=abc123&amp;u={encoded_target}&amp;target=https%3A%2F%2Fbrand.example.com%2Fpage&amp;c=1"
         cleaned = clean_search_result_url(bing_url)
         self.assertEqual(cleaned, "https://brand.example.com/page")
         self.assertEqual(clean_search_result_url("https://www.bing.com/ck/a?!&&p=abc123&u=badpayload&c=1"), "")

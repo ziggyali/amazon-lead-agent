@@ -78,7 +78,10 @@ class ExtractionMethodTests(unittest.TestCase):
                 }
 
         fake_module = SimpleNamespace(SmartScraperGraph=FakeSmartScraperGraph)
-        with patch.dict(sys.modules, {"scrapegraphai": SimpleNamespace(graphs=fake_module), "scrapegraphai.graphs": fake_module}):
+        with patch.dict(
+            sys.modules,
+            {"scrapegraphai": SimpleNamespace(graphs=fake_module), "scrapegraphai.graphs": fake_module},
+        ), patch.dict(os.environ, {"ENABLE_SCRAPEGRAPHAI": "true"}, clear=False):
             profile = extract_brand_profile("https://example.com", minimax_api_key="test")
 
         self.assertEqual(profile["extraction_method"], "scrapegraphai_other")
@@ -116,11 +119,51 @@ class ExtractionMethodTests(unittest.TestCase):
         with patch.dict(
             sys.modules,
             {"scrapegraphai": SimpleNamespace(graphs=fake_module), "scrapegraphai.graphs": fake_module},
-        ), patch.dict(os.environ, {"MINIMAX_API_KEY": "test-key", "SCRAPEGRAPHAI_LLM_PROVIDER": "minimax"}, clear=False):
+        ), patch.dict(os.environ, {"ENABLE_SCRAPEGRAPHAI": "true", "MINIMAX_API_KEY": "test-key", "SCRAPEGRAPHAI_LLM_PROVIDER": "minimax"}, clear=False):
             profile = extract_brand_profile("https://example.com", minimax_api_key="test", llm_config={"provider": "minimax", "minimax_model": "MiniMax-M3"})
 
         self.assertEqual(profile["extraction_method"], "scrapegraphai_minimax")
         self.assertEqual(profile["llm_provider_used"], "minimax")
+
+    @patch("amazon_lead_agent.tools.scrapegraph_runner._build_snapshot")
+    def test_scrapegraph_disabled_skips_scrapegraph_and_uses_direct_llm(self, mock_snapshot) -> None:
+        mock_snapshot.return_value = {
+            "url": "https://example.com",
+            "html": "<html></html>",
+            "text": "Example text",
+            "links": [],
+            "amazon_links": [],
+            "contact_links": [],
+            "public_emails": [],
+            "blocked": False,
+            "title": "Example Brand",
+            "source_urls": ["https://example.com"],
+        }
+
+        class FakeRouter:
+            last_used_provider = "minimax"
+            last_used_model = "MiniMax-M3"
+
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+
+            def generate_json(self, prompt, purpose="extraction"):
+                return {
+                    "company_name": "Example Brand",
+                    "brand_name": "Example Brand",
+                    "website": "https://example.com",
+                    "source_urls": ["https://example.com"],
+                }
+
+        with patch.dict(os.environ, {"ENABLE_SCRAPEGRAPHAI": "false"}, clear=False), patch(
+            "amazon_lead_agent.tools.scrapegraph_runner._scrapegraph_attempt"
+        ) as mock_scrapegraph_attempt, patch("amazon_lead_agent.tools.scrapegraph_runner.LLMRouter", FakeRouter):
+            profile = extract_brand_profile("https://example.com", minimax_api_key="test")
+
+        self.assertFalse(mock_scrapegraph_attempt.called)
+        self.assertEqual(profile["extraction_method"], "minimax_direct_m3")
+        self.assertEqual(profile["company_name"], "Example Brand")
 
     @patch("amazon_lead_agent.tools.scrapegraph_runner._build_snapshot")
     def test_router_gemini_success_is_labeled_gemini_direct(self, mock_snapshot) -> None:
@@ -153,7 +196,10 @@ class ExtractionMethodTests(unittest.TestCase):
                     "source_urls": ["https://example.com"],
                 }
 
-        with patch("amazon_lead_agent.tools.scrapegraph_runner.LLMRouter", FakeRouter):
+        with patch.dict(os.environ, {"ENABLE_SCRAPEGRAPHAI": "true"}, clear=False), patch(
+            "amazon_lead_agent.tools.scrapegraph_runner.LLMRouter",
+            FakeRouter,
+        ):
             profile = extract_brand_profile("https://example.com", minimax_api_key="test")
 
         self.assertEqual(profile["extraction_method"], "gemini_direct")
@@ -197,7 +243,13 @@ class ExtractionMethodTests(unittest.TestCase):
                 }
 
         fake_module = SimpleNamespace(SmartScraperGraph=FakeSmartScraperGraph)
-        with patch.dict(sys.modules, {"scrapegraphai": SimpleNamespace(graphs=fake_module), "scrapegraphai.graphs": fake_module}), patch("amazon_lead_agent.tools.scrapegraph_runner.LLMRouter", FakeRouter):
+        with patch.dict(
+            sys.modules,
+            {"scrapegraphai": SimpleNamespace(graphs=fake_module), "scrapegraphai.graphs": fake_module},
+        ), patch.dict(os.environ, {"ENABLE_SCRAPEGRAPHAI": "true"}, clear=False), patch(
+            "amazon_lead_agent.tools.scrapegraph_runner.LLMRouter",
+            FakeRouter,
+        ):
             profile = extract_brand_profile("https://example.com", minimax_api_key="test")
 
         self.assertEqual(profile["extraction_method"], "minimax_direct_m3")

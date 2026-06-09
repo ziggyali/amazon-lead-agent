@@ -5,8 +5,8 @@ import json
 from pathlib import Path
 import sqlite3
 
+from amazon_lead_agent.lead_filters import is_blocked_domain, is_junk_company_name, is_likely_brand_domain
 from amazon_lead_agent.normalization import normalize_domain
-from amazon_lead_agent.tools.search import clean_search_result_url
 from amazon_lead_agent.tools.sqlite_store import get_connection, init_db, upsert_lead
 
 
@@ -24,8 +24,6 @@ CONTENT_DOMAIN_BLOCKLIST = {
 }
 
 LISTICLE_TITLE_KEYWORDS = ("best", "top", "award winners", "list", "review")
-DOMAIN_KEYWORDS = ("dictionary", "reference", "marketplace", "video", "news", "listicle", "wiki", "youtube", "vimeo", "dailymotion")
-
 
 def _normalize_path(path: str) -> str:
     return Path(path or "data/leads.db").as_posix()
@@ -60,17 +58,21 @@ def _classify_lead(lead: sqlite3.Row) -> dict[str, str] | None:
     website = str(lead["website"] or "").strip()
     title = str(lead["company_name"] or lead["brand_name"] or "").lower()
     domains = _lead_domains(lead)
+    snippet = str(lead.get("amazon_evidence_summary") or lead.get("description") or "")
+    category = str(lead.get("category") or "")
 
     if website and _is_bing_redirect(website):
         return {"status": "rejected", "review_status": "rejected", "send_status": "not_eligible", "reason": "bing redirect website"}
+    if is_junk_company_name(lead.get("company_name") or lead.get("brand_name") or ""):
+        return {"status": "rejected", "review_status": "rejected", "send_status": "not_eligible", "reason": "available-like company name"}
+    if any(is_blocked_domain(domain) for domain in domains):
+        return {"status": "rejected", "review_status": "rejected", "send_status": "not_eligible", "reason": "blocked domain"}
     if any(domain in CONTENT_DOMAIN_BLOCKLIST for domain in domains):
         return {"status": "rejected", "review_status": "rejected", "send_status": "not_eligible", "reason": "content/listicle domain"}
-    if any(any(keyword in domain for keyword in DOMAIN_KEYWORDS) for domain in domains):
+    if any(keyword in website.lower() for keyword in ("dictionary", "reference", "marketplace", "video", "news", "listicle", "wiki", "youtube", "vimeo", "dailymotion")):
         return {"status": "rejected", "review_status": "rejected", "send_status": "not_eligible", "reason": "blocked domain keyword"}
     if any(keyword in title for keyword in LISTICLE_TITLE_KEYWORDS) and not any(domain and domain not in CONTENT_DOMAIN_BLOCKLIST for domain in domains):
         return {"status": "rejected", "review_status": "rejected", "send_status": "not_eligible", "reason": "listicle title"}
-    if str(lead["company_name"] or lead["brand_name"] or "").strip().lower() == "available":
-        return {"status": "rejected", "review_status": "rejected", "send_status": "not_eligible", "reason": "available company name"}
 
     extraction_method = str(lead["extraction_method"] or "").strip().lower()
     score = int(lead["score"] or 0)
@@ -79,6 +81,10 @@ def _classify_lead(lead: sqlite3.Row) -> dict[str, str] | None:
         has_amazon = bool(lead["amazon_backlink_found"])
         if not (has_contact or has_amazon):
             return {"status": "needs_enrichment", "review_status": "needs_enrichment", "send_status": "not_eligible", "reason": "blocked_or_error high score without verified signals"}
+    if lead.get("status") == "approved" and (not category or category == ""):
+        return {"status": "rejected", "review_status": "rejected", "send_status": "not_eligible", "reason": "approved lead missing category"}
+    if not is_likely_brand_domain(website, title, snippet, category) and website:
+        return {"status": "rejected", "review_status": "rejected", "send_status": "not_eligible", "reason": "not likely brand domain"}
     return None
 
 
@@ -113,6 +119,15 @@ def apply_cleanup(conn: sqlite3.Connection, actions: list[dict[str, str]]) -> in
                 "status": action["status"],
                 "review_status": action["review_status"],
                 "send_status": action["send_status"],
+                "tier": "Reject",
+                "score": min(int(payload.get("score") or 0), 25),
+                "draft_preview_subject": "",
+                "draft_preview_body": "",
+                "draft_subject": "",
+                "draft_body": "",
+                "draft_id": "",
+                "drafted": 0,
+                "cleanup_reason": action["reason"],
                 "notes": (payload.get("notes") or "") + f" [cleanup: {action['reason']}]",
             }
         )

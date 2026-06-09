@@ -30,6 +30,7 @@ DEFAULT_CONFIG = {
     "llm": {
         "provider": "minimax",
         "allow_heuristic_fallback": True,
+        "enable_scrapegraphai": False,
         "minimax_api_style": "chatcompletion_v2",
         "minimax_model": "MiniMax-M3",
         "minimax_api_base": "https://api.minimax.io/v1/text/chatcompletion_v2",
@@ -97,6 +98,7 @@ def apply_env_overrides(config: dict[str, Any]) -> dict[str, Any]:
         "MINIMUM_SCORE_FOR_DRAFT": ("campaign", "minimum_score_for_draft"),
         "MINIMUM_SCORE_FOR_AUTO_SEND": ("campaign", "minimum_score_for_auto_send"),
         "ALLOW_HEURISTIC_FALLBACK": ("llm", "allow_heuristic_fallback"),
+        "ENABLE_SCRAPEGRAPHAI": ("llm", "enable_scrapegraphai"),
         "MINIMAX_API_STYLE": ("llm", "minimax_api_style"),
         "MINIMAX_MODEL": ("llm", "minimax_model"),
         "MINIMAX_API_BASE": ("llm", "minimax_api_base"),

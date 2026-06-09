@@ -30,6 +30,19 @@ def _allow_heuristic_fallback() -> bool:
     return os.environ.get("ALLOW_HEURISTIC_FALLBACK", "true").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _scrapegraph_enabled(llm_config: dict | None = None) -> bool:
+    config_value = None
+    if isinstance(llm_config, dict):
+        config_value = llm_config.get("enable_scrapegraphai")
+    env_value = os.environ.get("ENABLE_SCRAPEGRAPHAI")
+    raw = env_value if env_value is not None and env_value.strip() != "" else config_value
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def _ensure_list(value: object) -> list[str]:
     if value is None:
         return []
@@ -242,11 +255,16 @@ def extract_brand_profile(url: str, minimax_api_key: str | None = None, llm_conf
         blocked_profile["extraction_error"] = "public page appears blocked or challenged"
         return blocked_profile
 
-    scrapegraph_profile, scrapegraph_error = _scrapegraph_attempt(url, snapshot, llm_config=llm_config)
-    if scrapegraph_profile:
-        scrapegraph_profile["scrapegraph_error"] = scrapegraph_error or ""
-        scrapegraph_profile["extraction_error"] = ""
-        return scrapegraph_profile
+    scrapegraph_profile: dict | None = None
+    scrapegraph_error: str | None = None
+    if _scrapegraph_enabled(llm_config):
+        scrapegraph_profile, scrapegraph_error = _scrapegraph_attempt(url, snapshot, llm_config=llm_config)
+        if scrapegraph_profile:
+            scrapegraph_profile["scrapegraph_error"] = scrapegraph_error or ""
+            scrapegraph_profile["extraction_error"] = ""
+            return scrapegraph_profile
+    else:
+        LOGGER.info("ScrapeGraphAI disabled for %s; using direct LLM extraction", url)
 
     prompt = _build_prompt(url, snapshot)
     router = LLMRouter(config={"llm": llm_config} if llm_config else None, minimax_api_key=minimax_api_key)

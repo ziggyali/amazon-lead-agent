@@ -49,7 +49,7 @@ bash scripts/run_local.sh
 - Set `LLM_PROVIDER=gemini` to make Gemini primary.
 - Set `LLM_FALLBACK_PROVIDERS=minimax,gemini` to keep both available.
 - Direct MiniMax API is supported.
-- ScrapeGraphAI is optional and used when it works locally.
+- ScrapeGraphAI is disabled by default. Set `ENABLE_SCRAPEGRAPHAI=true` only if you want to test it locally.
 - OpenAI is optional and requires a real OpenAI API key from the OpenAI platform. ChatGPT Business alone may not include API access.
 - Google Sheets is the primary source of truth. OAuth is the preferred auth mode for Hermes-created sheets, with service accounts available as a fallback.
 - SQLite is optional debug cache only unless you explicitly enable it.

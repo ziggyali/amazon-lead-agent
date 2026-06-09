@@ -8,6 +8,11 @@ class ScoringClassificationTests(unittest.TestCase):
         lead = {
             "score": 80,
             "tier": "B",
+            "company_name": "Brand Example",
+            "website": "https://brand.example.com",
+            "category": "beauty",
+            "amazon_backlink_found": True,
+            "amazon_links": ["https://amazon.com/stores/brand"],
             "public_emails": [],
             "contact_page_url": "https://example.com/contact",
         }
@@ -18,6 +23,11 @@ class ScoringClassificationTests(unittest.TestCase):
         lead = {
             "score": 80,
             "tier": "B",
+            "company_name": "Brand Example",
+            "website": "https://brand.example.com",
+            "category": "beauty",
+            "amazon_backlink_found": True,
+            "amazon_links": ["https://amazon.com/stores/brand"],
             "public_emails": ["hello@example.com"],
             "contact_page_url": "",
         }
@@ -34,6 +44,21 @@ class ScoringClassificationTests(unittest.TestCase):
         }
         outcome = classify_scored_lead(lead, 75)
         self.assertEqual(outcome["status"], "rejected")
+        self.assertEqual(outcome["send_status"], "not_eligible")
+
+    def test_high_score_without_amazon_evidence_is_not_approved(self) -> None:
+        lead = {
+            "score": 90,
+            "tier": "A",
+            "company_name": "Brand Example",
+            "website": "https://brand.example.com",
+            "category": "beauty",
+            "public_emails": ["hello@brand.example.com"],
+            "contact_page_url": "https://brand.example.com/contact",
+            "extraction_method": "minimax_direct_m3",
+        }
+        outcome = classify_scored_lead(lead, 75, allowed_categories={"beauty"})
+        self.assertEqual(outcome["status"], "needs_enrichment")
         self.assertEqual(outcome["send_status"], "not_eligible")
 
 

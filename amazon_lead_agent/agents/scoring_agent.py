@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from amazon_lead_agent.lead_filters import is_blocked_domain, is_junk_company_name, is_likely_brand_domain
 from amazon_lead_agent.tools.storage_router import StorageRouter, get_storage_router
 
 
@@ -108,11 +109,46 @@ def score_lead(lead: dict) -> dict:
     }
 
 
-def classify_scored_lead(lead: dict, min_score_for_draft: int) -> dict:
+def _verified_amazon_evidence(lead: dict) -> bool:
+    amazon_backlink = _truthy(lead.get("amazon_backlink_found"))
+    amazon_links = lead.get("amazon_links") or lead.get("amazon_links_json") or []
+    evidence_text = " ".join(
+        str(part or "")
+        for part in [lead.get("amazon_evidence_summary"), lead.get("description"), lead.get("notes")]
+    ).lower()
+    return bool(
+        amazon_backlink
+        or amazon_links
+        or any(signal in evidence_text for signal in ("available on amazon", "shop our amazon store", "buy on amazon", "amazon storefront", "amazon store"))
+    )
+
+
+def _approval_eligible(lead: dict, allowed_categories: set[str]) -> bool:
+    category = str(lead.get("category", "")).strip().lower()
+    website = str(lead.get("website") or "").strip()
+    title = str(lead.get("company_name") or lead.get("brand_name") or "")
+    snippet = str(lead.get("amazon_evidence_summary") or lead.get("description") or "")
+    if not category or category not in allowed_categories:
+        return False
+    if is_junk_company_name(title):
+        return False
+    if is_blocked_domain(website):
+        return False
+    if not is_likely_brand_domain(website, title, snippet, category):
+        return False
+    if not _verified_amazon_evidence(lead):
+        return False
+    return True
+
+
+def classify_scored_lead(lead: dict, min_score_for_draft: int, allowed_categories: set[str] | None = None) -> dict:
+    allowed_categories = {str(item).strip().lower() for item in (allowed_categories or RELEVANT_CATEGORIES) if str(item).strip()}
     score = int(lead.get("score") or 0)
     has_email = bool((lead.get("public_emails") or []))
     has_contact_page = bool(lead.get("contact_page_url"))
-    if str(lead.get("extraction_method") or "").strip().lower() == "blocked_or_error":
+    extraction_method = str(lead.get("extraction_method") or "").strip().lower()
+    approval_eligible = _approval_eligible(lead, allowed_categories)
+    if extraction_method == "blocked_or_error":
         return {
             "status": "rejected",
             "review_status": "rejected",
@@ -120,7 +156,7 @@ def classify_scored_lead(lead: dict, min_score_for_draft: int) -> dict:
             "email_status": "unknown",
             "lead_type": "lead",
         }
-    if score >= min_score_for_draft and has_email and lead.get("tier") in {"A", "B"}:
+    if score >= min_score_for_draft and has_email and approval_eligible and lead.get("tier") in {"A", "B"}:
         return {
             "status": "approved",
             "review_status": "approved",
@@ -128,13 +164,29 @@ def classify_scored_lead(lead: dict, min_score_for_draft: int) -> dict:
             "email_status": "public_email",
             "lead_type": "lead",
         }
-    if score >= min_score_for_draft and has_contact_page and not has_email:
+    if score >= min_score_for_draft and has_contact_page and not has_email and approval_eligible:
         return {
             "status": "contact_form_queue",
             "review_status": "needs_contact_form",
             "send_status": "contact_form_queue",
             "email_status": "contact_form_only",
             "lead_type": "contact_form_queue",
+        }
+    if not approval_eligible:
+        if not _verified_amazon_evidence(lead) or not has_contact_page and not has_email:
+            return {
+                "status": "needs_enrichment",
+                "review_status": "needs_enrichment",
+                "send_status": "not_eligible",
+                "email_status": "unknown",
+                "lead_type": "lead",
+            }
+        return {
+            "status": "rejected",
+            "review_status": "rejected",
+            "send_status": "not_eligible",
+            "email_status": "unknown",
+            "lead_type": "lead",
         }
     if lead.get("tier") == "Reject" or score < min_score_for_draft:
         return {
@@ -165,9 +217,10 @@ def run_scoring(config: dict, db_path: Path | StorageRouter) -> list[dict]:
     try:
         leads = storage.get_leads_for_scoring(int(config["campaign"]["daily_discovery_limit"]))
         min_score_for_draft = int(config["campaign"]["minimum_score_for_draft"])
+        allowed_categories = {str(item).strip().lower() for item in config.get("campaign", {}).get("categories", []) if str(item).strip()}
         for lead in leads:
             update = score_lead(lead)
-            classification = classify_scored_lead({**lead, **update}, min_score_for_draft)
+            classification = classify_scored_lead({**lead, **update}, min_score_for_draft, allowed_categories=allowed_categories or None)
             merged = {**lead, **update, **classification}
             storage.upsert_lead(merged)
             storage.record_outreach_event({"lead_id": lead["id"], "event_type": "scored", "metadata": update})

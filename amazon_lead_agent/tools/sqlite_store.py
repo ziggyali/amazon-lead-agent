@@ -70,6 +70,7 @@ def init_db(path: str | Path) -> None:
                 llm_model_used TEXT,
                 extraction_fallback INTEGER DEFAULT 0,
                 blocked_or_error INTEGER DEFAULT 0,
+                cleanup_reason TEXT,
                 status TEXT DEFAULT 'new',
                 draft_id TEXT,
                 drafted INTEGER DEFAULT 0,
@@ -141,6 +142,7 @@ def init_db(path: str | Path) -> None:
                 "llm_model_used": "TEXT",
                 "extraction_fallback": "INTEGER DEFAULT 0",
                 "blocked_or_error": "INTEGER DEFAULT 0",
+                "cleanup_reason": "TEXT",
             },
         )
         _ensure_columns(
@@ -230,6 +232,7 @@ def _lead_row(lead: dict) -> dict:
         "llm_model_used": lead.get("llm_model_used", ""),
         "extraction_fallback": int(bool(lead.get("extraction_fallback"))),
         "blocked_or_error": int(bool(lead.get("blocked_or_error"))),
+        "cleanup_reason": lead.get("cleanup_reason", ""),
         "lead_type": lead.get("lead_type", "lead"),
         "status": lead.get("status", "new"),
         "draft_id": lead.get("draft_id", ""),

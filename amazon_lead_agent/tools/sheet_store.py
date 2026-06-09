@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import logging
 from typing import Any
+import socket
 
 from amazon_lead_agent.normalization import make_lead_id
 from amazon_lead_agent.tools import google_sheets
@@ -213,6 +214,25 @@ class SheetStore:
                 status_code = int(status) if status is not None else None
                 if status_code in {429, 500, 502, 503, 504} and attempt < 4:
                     LOGGER.info("sheet write retry label=%s attempt=%s status=%s", label, attempt + 1, status)
+                    import random
+                    import time
+
+                    time.sleep(delay + random.random() * 0.25)
+                    delay *= 2
+                    continue
+                winerror = getattr(exc, "winerror", None) or getattr(getattr(exc, "__cause__", None), "winerror", None)
+                err_no = getattr(exc, "errno", None) or getattr(getattr(exc, "__cause__", None), "errno", None)
+                message = str(exc).lower()
+                retryable_connection_error = any(
+                    [
+                        winerror in {10054, 10060, 10061, 10065},
+                        err_no in {10054, 10060, 10061, 10065},
+                        isinstance(exc, (TimeoutError, socket.timeout, ConnectionError)),
+                        any(token in message for token in ("timed out", "timeout", "connection reset", "connection aborted", "network is unreachable", "temporary failure in name resolution")),
+                    ]
+                )
+                if retryable_connection_error and attempt < 4:
+                    LOGGER.info("sheet connection retry label=%s attempt=%s error=%s", label, attempt + 1, exc)
                     import random
                     import time
 
