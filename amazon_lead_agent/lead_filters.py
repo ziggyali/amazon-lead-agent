@@ -129,6 +129,7 @@ JUNK_COMPANY_PATTERNS = (
 )
 
 PREFERRED_PATH_HINTS = ("/pages/where-to-buy", "/retailers", "/amazon", "/store-locator", "/contact", "/about")
+BRAND_PATH_HINTS = ("/about", "/contact", "/pages", "/where-to-buy", "/retailers", "/stockists", "/amazon", "/products", "/collections", "/shop")
 BRAND_SIGNAL_TERMS = (
     "official",
     "shop",
@@ -147,6 +148,7 @@ RELATED_TERM_TERMS = (
     "stockists",
     "available",
 )
+KNOWN_PLATFORM_TOKENS = ("shopify", "bigcommerce", "wix", "squarespace", "wordpress", "blogspot", "amazon", "ebay", "walmart", "etsy", "tiktok", "instagram", "facebook", "youtube", "vimeo", "linkedin")
 
 
 def normalized_host(value: str | None) -> str:
@@ -155,6 +157,15 @@ def normalized_host(value: str | None) -> str:
 
 def _matches_root(domain: str, root: str) -> bool:
     return domain == root or domain.endswith(f".{root}")
+
+
+def _has_blocked_title_keyword(text: str) -> bool:
+    lowered = f" {text.lower()} "
+    for keyword in BLOCKED_TITLE_KEYWORDS:
+        pattern = rf"\b{re.escape(keyword)}\b"
+        if re.search(pattern, lowered):
+            return True
+    return False
 
 
 def is_blocked_domain(value: str | None) -> bool:
@@ -197,11 +208,20 @@ def is_soft_brand_candidate(url: str | None, title: str | None = "", snippet: st
         return False
     title_text = (title or "").lower()
     snippet_text = (snippet or "").lower()
-    if category and category.strip().lower() in title_text + " " + snippet_text:
+    signal_text = f"{title_text} {snippet_text}"
+    path_text = urlparse(url or "").path.lower()
+    if any(hint in path_text for hint in BRAND_PATH_HINTS):
         return True
-    if any(term in f"{title_text} {snippet_text}" for term in RELATED_TERM_TERMS):
+    if category and category.strip().lower() in signal_text:
         return True
-    return True
+    if any(term in signal_text for term in RELATED_TERM_TERMS):
+        return True
+    if any(signal in signal_text for signal in BRAND_SIGNAL_TERMS):
+        return True
+    root = domain.split(".")
+    if len(root) <= 5 and not any(token in domain for token in KNOWN_PLATFORM_TOKENS):
+        return True
+    return False
 
 
 def _has_official_signal(title: str, snippet: str, url: str) -> bool:
@@ -225,33 +245,45 @@ def is_likely_brand_domain(url: str | None, title: str | None = "", snippet: str
     snippet_text = (snippet or "").lower()
     path_text = urlparse(url or "").path.lower()
     signal_text = f"{title_text} {snippet_text}"
-    if any(keyword in title_text for keyword in BLOCKED_TITLE_KEYWORDS) and not _has_official_signal(title_text, snippet_text, url or ""):
+    if _has_blocked_title_keyword(title_text) and not _has_official_signal(title_text, snippet_text, url or ""):
         return False
-    if any(keyword in snippet_text for keyword in ("listicle", "news", "article", "review")) and not _has_official_signal(title_text, snippet_text, url or ""):
+    if any(re.search(rf"\b{re.escape(keyword)}\b", snippet_text) for keyword in ("listicle", "news", "article", "review")) and not _has_official_signal(title_text, snippet_text, url or ""):
         return False
     if any(keyword in domain for keyword in BLOCKED_DOMAIN_KEYWORDS):
         return False
-    if any(hint in path_text for hint in PREFERRED_PATH_HINTS):
+    if any(hint in path_text for hint in BRAND_PATH_HINTS):
         return True
     if any(signal in signal_text for signal in ("official site", "official website", "brand site", "where to buy", "amazon store", *BRAND_SIGNAL_TERMS, *RELATED_TERM_TERMS)):
         return True
     if _has_official_signal(title_text, snippet_text, url or ""):
         return True
     root = domain.split(".")
-    if len(root) <= 4 and not any(token in domain for token in ("shopify", "bigcommerce", "wix", "squarespace", "wordpress", "blogspot", "amazon", "ebay", "walmart", "etsy")):
-        return True
+    if len(root) <= 4 and not any(token in domain for token in KNOWN_PLATFORM_TOKENS):
+        if not _has_blocked_title_keyword(title_text) and not any(re.search(rf"\b{re.escape(keyword)}\b", snippet_text) for keyword in ("listicle", "news", "article", "review")):
+            return True
     if category and category.strip().lower() in signal_text:
         return True
     return False
 
 
-def is_junk_or_blocked_result(url: str | None, title: str | None = "", snippet: str | None = "", category: str | None = "") -> bool:
+def is_hard_junk_result(url: str | None, title: str | None = "", snippet: str | None = "", category: str | None = "") -> bool:
     if is_blocked_domain(url):
         return True
     if is_tracking_or_search_domain(url):
         return True
     if is_junk_company_name(title):
         return True
-    if not is_likely_brand_domain(url, title, snippet, category):
+    title_text = (title or "").lower()
+    snippet_text = (snippet or "").lower()
+    if _has_blocked_title_keyword(title_text):
+        return True
+    if any(re.search(rf"\b{re.escape(keyword)}\b", snippet_text) for keyword in ("listicle", "news", "article", "review")):
+        return True
+    domain = normalize_domain(url)
+    if any(keyword in domain for keyword in BLOCKED_DOMAIN_KEYWORDS):
         return True
     return False
+
+
+def is_junk_or_blocked_result(url: str | None, title: str | None = "", snippet: str | None = "", category: str | None = "") -> bool:
+    return is_hard_junk_result(url, title, snippet, category)

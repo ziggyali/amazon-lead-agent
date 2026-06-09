@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from amazon_lead_agent.tools import google_sheets
 from amazon_lead_agent.tools.sheet_store import SheetStore
 from amazon_lead_agent.tools.sqlite_store import (
     get_connection,
@@ -80,6 +81,7 @@ class StorageRouter:
             self._sqlite_conn = get_connection(self.db_path)
 
         if self._sheet_store:
+            google_sheets.reset_io_stats()
             try:
                 self._sheet_store.warm_tabs()
             except Exception as exc:  # noqa: BLE001
@@ -239,6 +241,7 @@ class StorageRouter:
         if self._sheet_store:
             snapshot["sheet_store"] = self._sheet_store.snapshot()
             snapshot["sheet_flush_errors"] = list(getattr(self._sheet_store, "flush_errors", []))
+        snapshot.update(google_sheets.get_io_stats())
         return snapshot
 
     def commit(self) -> None:

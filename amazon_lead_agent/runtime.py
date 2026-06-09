@@ -41,6 +41,7 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
         "rejected_listicle_domains_count": 0,
         "hard_rejected_junk_count": 0,
         "soft_pass_needs_enrichment_count": 0,
+        "rejected_likely_brand_filter_count": 0,
         "rejected_due_to_no_amazon_evidence_count": 0,
         "discovered_count_by_category": {},
         "cleaned_redirect_count": 0,
@@ -49,7 +50,11 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
         "llm_model_counts": {},
         "extraction_method_counts": {},
         "sheet_mirror_error_count": 0,
+        "sheet_read_error_count": 0,
+        "sheet_read_retry_count": 0,
+        "sheet_connection_error_count": 0,
         "failed_sheet_rows": [],
+        "failed_sheet_reads": [],
         "sheet_flush_errors": [],
         "sheet_mirror_status": "enabled" if storage.uses_sheets else "disabled",
         "top_5_leads": [],
@@ -72,6 +77,7 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
             report["rejected_listicle_domains_count"] = int(search_stats.get("rejected_listicle_domains_count", 0))
             report["hard_rejected_junk_count"] = int(search_stats.get("hard_rejected_junk_count", 0))
             report["soft_pass_needs_enrichment_count"] = int(search_stats.get("soft_pass_needs_enrichment_count", 0))
+            report["rejected_likely_brand_filter_count"] = int(search_stats.get("rejected_likely_brand_filter_count", 0))
             report["rejected_due_to_no_amazon_evidence_count"] = int(search_stats.get("rejected_due_to_no_amazon_evidence_count", 0))
             report["discovered_count_by_category"] = search_stats.get("discovered_count_by_category", {})
             report["cleaned_redirect_count"] = int(search_stats.get("cleaned_redirect_count", 0))
@@ -139,7 +145,11 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
                 "dry_run": dry_run,
                 "sheet_mirror_status": report["sheet_mirror_status"],
                 "sheet_mirror_error_count": report["sheet_mirror_error_count"],
+                "sheet_read_error_count": report["sheet_read_error_count"],
+                "sheet_read_retry_count": report["sheet_read_retry_count"],
+                "sheet_connection_error_count": report["sheet_connection_error_count"],
                 "failed_sheet_rows": report["failed_sheet_rows"],
+                "failed_sheet_reads": report["failed_sheet_reads"],
                 "sheet_flush_errors": report["sheet_flush_errors"],
                 "search_provider_counts": report["search_provider_counts"],
                 "provider_blocked_counts": report["provider_blocked_counts"],
@@ -148,6 +158,7 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
                 "rejected_content_domains_count": report["rejected_content_domains_count"],
                 "hard_rejected_junk_count": report["hard_rejected_junk_count"],
                 "soft_pass_needs_enrichment_count": report["soft_pass_needs_enrichment_count"],
+                "rejected_likely_brand_filter_count": report["rejected_likely_brand_filter_count"],
                 "rejected_due_to_no_amazon_evidence_count": report["rejected_due_to_no_amazon_evidence_count"],
                 "discovered_count_by_category": report["discovered_count_by_category"],
                 "cleaned_redirect_count": report["cleaned_redirect_count"],
@@ -181,7 +192,11 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
                     "errors": report["errors"],
                     "sheet_mirror_status": report["sheet_mirror_status"],
                     "sheet_mirror_error_count": report["sheet_mirror_error_count"],
+                    "sheet_read_error_count": report["sheet_read_error_count"],
+                    "sheet_read_retry_count": report["sheet_read_retry_count"],
+                    "sheet_connection_error_count": report["sheet_connection_error_count"],
                     "failed_sheet_rows": report["failed_sheet_rows"],
+                    "failed_sheet_reads": report["failed_sheet_reads"],
                     "sheet_flush_errors": report["sheet_flush_errors"],
                     "search_provider_counts": report["search_provider_counts"],
                     "provider_blocked_counts": report["provider_blocked_counts"],
@@ -190,6 +205,7 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
                     "rejected_content_domains_count": report["rejected_content_domains_count"],
                     "hard_rejected_junk_count": report["hard_rejected_junk_count"],
                     "soft_pass_needs_enrichment_count": report["soft_pass_needs_enrichment_count"],
+                    "rejected_likely_brand_filter_count": report["rejected_likely_brand_filter_count"],
                     "rejected_due_to_no_amazon_evidence_count": report["rejected_due_to_no_amazon_evidence_count"],
                     "discovered_count_by_category": report["discovered_count_by_category"],
                     "cleaned_redirect_count": report["cleaned_redirect_count"],
@@ -206,6 +222,10 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
         snapshot = storage.snapshot()
         report["sheet_mirror_error_count"] = int(snapshot.get("sheet_mirror_error_count", report["sheet_mirror_error_count"]))
         report["failed_sheet_rows"] = snapshot.get("failed_sheet_rows", report["failed_sheet_rows"])
+        report["sheet_read_error_count"] = int(snapshot.get("sheet_read_error_count", report["sheet_read_error_count"]))
+        report["sheet_read_retry_count"] = int(snapshot.get("sheet_read_retry_count", report["sheet_read_retry_count"]))
+        report["sheet_connection_error_count"] = int(snapshot.get("sheet_connection_error_count", report["sheet_connection_error_count"]))
+        report["failed_sheet_reads"] = snapshot.get("failed_sheet_reads", report["failed_sheet_reads"])
         report["sheet_flush_errors"] = snapshot.get("sheet_flush_errors", report["sheet_flush_errors"])
         report["sheet_mirror_status"] = "enabled" if snapshot.get("uses_sheets") else "disabled"
         storage.commit()

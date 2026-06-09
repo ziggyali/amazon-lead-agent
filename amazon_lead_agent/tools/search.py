@@ -19,9 +19,10 @@ from amazon_lead_agent.lead_filters import (
     BLOCKED_ROOT_DOMAINS,
     BLOCKED_TITLE_KEYWORDS,
     PREFERRED_PATH_HINTS,
+    is_hard_junk_result,
     is_junk_company_name,
-    is_junk_or_blocked_result,
     is_likely_brand_domain,
+    is_soft_brand_candidate,
 )
 
 
@@ -67,6 +68,7 @@ def _new_stats() -> dict:
         "rate_limited_query_counts": defaultdict(int),
         "rejected_content_domain_count": 0,
         "rejected_listicle_domains_count": 0,
+        "rejected_likely_brand_filter_count": 0,
         "hard_rejected_junk_count": 0,
         "soft_pass_needs_enrichment_count": 0,
         "rejected_due_to_no_amazon_evidence_count": 0,
@@ -378,11 +380,12 @@ def _is_rejectable_content_result(result: dict) -> bool:
     title = (result.get("title") or "").lower()
     url = result.get("url") or ""
     snippet = (result.get("snippet") or "").lower()
-    if is_junk_or_blocked_result(url, title, snippet):
-        return True
-    if any(keyword in title for keyword in CONTENT_TITLE_KEYWORDS) and not _has_preferred_path(url):
+    if is_hard_junk_result(url, title, snippet):
         return True
     if any(keyword in domain for keyword in AGENCY_DOMAIN_KEYWORDS) and not _has_preferred_path(url):
+        if not is_soft_brand_candidate(url, title, snippet):
+            return True
+    if any(re.search(rf"\b{re.escape(keyword)}\b", title) for keyword in ("list", "review", "best", "top")) and not is_soft_brand_candidate(url, title, snippet):
         return True
     return False
 
@@ -431,11 +434,11 @@ def discover_candidates(categories: list[str], limit: int = 50) -> list[dict]:
             domain = normalize_domain(result.get("url"))
             if not domain or domain in seen_domains:
                 continue
-            if not is_likely_brand_domain(result.get("url"), result.get("title"), result.get("snippet"), next((category for category in categories if category.lower() in query.lower()), "")):
-                _LAST_SEARCH_STATS["rejected_content_domain_count"] += 1
-                continue
+            category = next((category for category in categories if category.lower() in query.lower()), "")
+            if not is_likely_brand_domain(result.get("url"), result.get("title"), result.get("snippet"), category):
+                _LAST_SEARCH_STATS["rejected_likely_brand_filter_count"] += 1
             seen_domains.add(domain)
-            result["category"] = next((category for category in categories if category.lower() in query.lower()), "")
+            result["category"] = category
             result["company_name"] = normalize_company_name(result.get("title") or domain)
             if is_junk_company_name(result["company_name"]):
                 _LAST_SEARCH_STATS["rejected_content_domain_count"] += 1

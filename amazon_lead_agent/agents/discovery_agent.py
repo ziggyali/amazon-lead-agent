@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlparse
 
 from amazon_lead_agent.lead_filters import is_junk_company_name, is_blocked_domain, is_tracking_or_search_domain, is_likely_brand_domain, is_soft_brand_candidate
 from amazon_lead_agent.normalization import make_lead_id, normalize_company_name
@@ -47,7 +48,13 @@ def _candidate_status(lead: dict[str, object]) -> str:
     snippet = str(lead.get("amazon_evidence_summary") or "")
     category = str(lead.get("category") or "")
     if is_likely_brand_domain(website, title, snippet, category):
-        return "discovered"
+        path = urlparse(website).path.lower()
+        signal_text = f"{title} {snippet}".lower()
+        if any(hint in path for hint in ("/retailers", "/where-to-buy", "/amazon", "/store-locator")):
+            return "discovered"
+        if any(signal in signal_text for signal in ("official site", "official website", "amazon store", "shop our", "where to buy")):
+            return "discovered"
+        return "needs_enrichment"
     if is_soft_brand_candidate(website, title, snippet, category):
         return "needs_enrichment"
     return "needs_enrichment"

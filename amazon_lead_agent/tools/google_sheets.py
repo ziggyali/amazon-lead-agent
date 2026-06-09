@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
+import time
 from typing import Any
 
 LOGGER = logging.getLogger(__name__)
@@ -15,6 +17,29 @@ SPREADSHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 MAX_CELL_LENGTH = 5000
 MAX_URL_CELL_LENGTH = 1000
 CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _new_io_stats() -> dict[str, Any]:
+    return {
+        "sheet_read_error_count": 0,
+        "sheet_read_retry_count": 0,
+        "sheet_connection_error_count": 0,
+        "failed_sheet_reads": [],
+    }
+
+
+_LAST_IO_STATS = _new_io_stats()
+
+
+def reset_io_stats() -> None:
+    global _LAST_IO_STATS
+    _LAST_IO_STATS = _new_io_stats()
+
+
+def get_io_stats() -> dict[str, Any]:
+    stats = dict(_LAST_IO_STATS)
+    stats["failed_sheet_reads"] = list(stats.get("failed_sheet_reads", []))
+    return stats
 
 
 def _auth_mode() -> str:
@@ -155,17 +180,73 @@ def _build_service(auth_mode: str | None = None):
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 
-def read_tab_rows(sheet_id: str, tab: str) -> list[dict[str, Any]]:
-    service = _build_service()
-    values = service.spreadsheets().values().get(spreadsheetId=sheet_id, range=f"{tab}!A:ZZ").execute().get("values", [])
-    if not values:
-        return []
-    headers = values[0]
-    rows: list[dict[str, Any]] = []
-    for row in values[1:]:
-        item = {headers[index]: row[index] if index < len(row) else "" for index in range(len(headers))}
-        rows.append(item)
-    return rows
+def _is_auth_error(exc: Exception) -> bool:
+    status = getattr(getattr(exc, "resp", None), "status", None) or getattr(exc, "status_code", None)
+    lowered = str(exc).lower()
+    if status is not None:
+        try:
+            if int(status) in {401, 403}:
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+    return any(token in lowered for token in ("invalid_grant", "invalid_client", "unauthorized", "forbidden", "permission denied"))
+
+
+def _is_retryable_read_error(exc: Exception) -> bool:
+    status = getattr(getattr(exc, "resp", None), "status", None) or getattr(exc, "status_code", None)
+    status_code = int(status) if status is not None else None
+    if status_code in {429, 500, 502, 503, 504}:
+        return True
+    winerror = getattr(exc, "winerror", None) or getattr(getattr(exc, "__cause__", None), "winerror", None)
+    err_no = getattr(exc, "errno", None) or getattr(getattr(exc, "__cause__", None), "errno", None)
+    lowered = str(exc).lower()
+    return any(
+        [
+            winerror in {10054, 10060, 10061, 10065},
+            err_no in {10054, 10060, 10061, 10065},
+            isinstance(exc, (TimeoutError, socket.timeout, ConnectionError)),
+            any(token in lowered for token in ("timed out", "timeout", "connection reset", "connection aborted", "network is unreachable", "temporary failure in name resolution")),
+        ]
+    )
+
+
+def _record_read_failure(sheet_id: str, tab: str, exc: Exception) -> None:
+    _LAST_IO_STATS["sheet_read_error_count"] += 1
+    winerror = getattr(exc, "winerror", None) or getattr(getattr(exc, "__cause__", None), "winerror", None)
+    err_no = getattr(exc, "errno", None) or getattr(getattr(exc, "__cause__", None), "errno", None)
+    status = getattr(getattr(exc, "resp", None), "status", None) or getattr(exc, "status_code", None)
+    if winerror in {10054, 10060, 10061, 10065} or err_no in {10054, 10060, 10061, 10065} or isinstance(exc, (TimeoutError, socket.timeout, ConnectionError)):
+        _LAST_IO_STATS["sheet_connection_error_count"] += 1
+    _LAST_IO_STATS["failed_sheet_reads"].append({"sheet_id": sheet_id, "tab": tab, "status": status, "error": str(exc)})
+
+
+def read_tab_rows(sheet_id: str, tab: str, auth_mode: str | None = None) -> list[dict[str, Any]]:
+    delay = 0.5
+    for attempt in range(5):
+        try:
+            service = _build_service(auth_mode=auth_mode)
+            values = service.spreadsheets().values().get(spreadsheetId=sheet_id, range=f"{tab}!A:ZZ").execute().get("values", [])
+            if not values:
+                return []
+            headers = values[0]
+            rows: list[dict[str, Any]] = []
+            for row in values[1:]:
+                item = {headers[index]: row[index] if index < len(row) else "" for index in range(len(headers))}
+                rows.append(item)
+            return rows
+        except Exception as exc:  # noqa: BLE001
+            if _is_auth_error(exc):
+                raise RuntimeError(f"Google Sheets auth failed while reading {tab}: {exc}") from exc
+            if _is_retryable_read_error(exc) and attempt < 4:
+                _LAST_IO_STATS["sheet_read_retry_count"] += 1
+                _record_read_failure(sheet_id, tab, exc)
+                LOGGER.info("sheet read retry sheet_id=%s tab=%s attempt=%s error=%s", sheet_id, tab, attempt + 1, exc)
+                time.sleep(delay + (delay * 0.2))
+                delay *= 2
+                continue
+            _record_read_failure(sheet_id, tab, exc)
+            LOGGER.warning("sheet read failed sheet_id=%s tab=%s error=%s", sheet_id, tab, exc)
+            return []
 
 
 def _ensure_tab_exists(service, sheet_id: str, tab: str) -> None:

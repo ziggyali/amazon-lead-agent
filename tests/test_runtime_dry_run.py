@@ -134,6 +134,7 @@ class DryRunTests(unittest.TestCase):
                         "rejected_listicle_domains_count": 0,
                         "hard_rejected_junk_count": 0,
                         "soft_pass_needs_enrichment_count": 1,
+                        "rejected_likely_brand_filter_count": 2,
                         "rejected_due_to_no_amazon_evidence_count": 0,
                         "discovered_count_by_category": {"beauty": 1},
                     },
@@ -218,6 +219,7 @@ class DryRunTests(unittest.TestCase):
             self.assertEqual(report["cleaned_redirect_count"], 0)
             self.assertEqual(report["rejected_redirect_count"], 0)
             self.assertEqual(report["soft_pass_needs_enrichment_count"], 1)
+            self.assertEqual(report["rejected_likely_brand_filter_count"], 2)
             self.assertEqual(report["discovered_count_by_category"], {"beauty": 1})
 
     @patch("amazon_lead_agent.runtime.get_storage_router")
@@ -264,6 +266,10 @@ class DryRunTests(unittest.TestCase):
                 def __init__(self):
                     self.failed_sheet_rows = [{"tab": "Lead Queue", "error": "Invalid values[1][16]"}]
                     self.sheet_mirror_error_count = 1
+                    self.sheet_read_error_count = 2
+                    self.sheet_read_retry_count = 3
+                    self.sheet_connection_error_count = 2
+                    self.failed_sheet_reads = [{"sheet_id": "sheet-123", "tab": "Lead Queue", "error": "timeout"}]
 
                 def upsert_lead(self, lead, tab=None):
                     raise ValueError("Invalid values[1][16]")
@@ -287,6 +293,10 @@ class DryRunTests(unittest.TestCase):
                     return {
                         "sheet_mirror_error_count": self.sheet_mirror_error_count,
                         "failed_sheet_rows": self.failed_sheet_rows,
+                        "sheet_read_error_count": self.sheet_read_error_count,
+                        "sheet_read_retry_count": self.sheet_read_retry_count,
+                        "sheet_connection_error_count": self.sheet_connection_error_count,
+                        "failed_sheet_reads": self.failed_sheet_reads,
                         "uses_sheets": True,
                     }
 
@@ -313,6 +323,10 @@ class DryRunTests(unittest.TestCase):
             finally:
                 os.chdir(old_cwd)
             self.assertGreaterEqual(report["sheet_mirror_error_count"], 1)
+            self.assertEqual(report["sheet_read_error_count"], 2)
+            self.assertEqual(report["sheet_read_retry_count"], 3)
+            self.assertEqual(report["sheet_connection_error_count"], 2)
+            self.assertEqual(report["failed_sheet_reads"], [{"sheet_id": "sheet-123", "tab": "Lead Queue", "error": "timeout"}])
             self.assertTrue(report["failed_sheet_rows"])
             self.assertTrue(Path(tmpdir, "campaign_report.md").exists())
             self.assertTrue(report["campaign_report_path"])

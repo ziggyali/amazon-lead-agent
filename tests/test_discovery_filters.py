@@ -104,6 +104,25 @@ class DiscoveryFilterTests(unittest.TestCase):
 
     @patch("amazon_lead_agent.agents.discovery_agent.discover_candidates")
     @patch("amazon_lead_agent.agents.discovery_agent.get_last_search_stats", return_value={})
+    def test_official_looking_about_page_soft_passes_to_needs_enrichment(self, mock_stats, mock_discover) -> None:
+        mock_discover.return_value = [
+            {
+                "title": "Brand Example",
+                "url": "https://brand.example.com/about",
+                "source_url": "https://brand.example.com/about",
+                "snippet": "our story and products",
+                "category": "beauty",
+            }
+        ]
+        storage = FakeStorage()
+        config = {"campaign": {"categories": ["beauty"], "daily_discovery_limit": 5}}
+        result = run_discovery(config, storage)
+        self.assertEqual(len(result["leads"]), 1)
+        self.assertEqual(result["leads"][0]["status"], "needs_enrichment")
+        self.assertEqual(storage.upserts[0][1]["status"], "needs_enrichment")
+
+    @patch("amazon_lead_agent.agents.discovery_agent.discover_candidates")
+    @patch("amazon_lead_agent.agents.discovery_agent.get_last_search_stats", return_value={})
     def test_discovered_count_by_category_is_populated(self, mock_stats, mock_discover) -> None:
         mock_discover.return_value = [
             {
