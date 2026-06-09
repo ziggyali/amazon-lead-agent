@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from amazon_lead_agent.tools.sqlite_store import get_connection, get_leads_for_scoring, upsert_lead, record_outreach_event
+from amazon_lead_agent.tools.storage_router import StorageRouter, get_storage_router
 
 
 RELEVANT_CATEGORIES = {"beauty", "pet", "home", "supplements"}
@@ -145,20 +145,25 @@ def classify_scored_lead(lead: dict, min_score_for_draft: int) -> dict:
     }
 
 
-def run_scoring(config: dict, db_path: Path) -> list[dict]:
-    conn = get_connection(db_path)
+def _storage(config: dict, storage_or_path: Path | StorageRouter) -> StorageRouter:
+    if isinstance(storage_or_path, StorageRouter):
+        return storage_or_path
+    return get_storage_router(config, storage_or_path)
+
+
+def run_scoring(config: dict, db_path: Path | StorageRouter) -> list[dict]:
+    storage = _storage(config, db_path)
     scored: list[dict] = []
     try:
-        leads = get_leads_for_scoring(conn, int(config["campaign"]["daily_discovery_limit"]))
+        leads = storage.get_leads_for_scoring(int(config["campaign"]["daily_discovery_limit"]))
         min_score_for_draft = int(config["campaign"]["minimum_score_for_draft"])
         for lead in leads:
             update = score_lead(lead)
             classification = classify_scored_lead({**lead, **update}, min_score_for_draft)
             merged = {**lead, **update, **classification}
-            upsert_lead(conn, merged)
-            record_outreach_event(conn, {"lead_id": lead["id"], "event_type": "scored", "metadata": update})
-            record_outreach_event(
-                conn,
+            storage.upsert_lead(merged)
+            storage.record_outreach_event({"lead_id": lead["id"], "event_type": "scored", "metadata": update})
+            storage.record_outreach_event(
                 {
                     "lead_id": lead["id"],
                     "event_type": classification["status"],
@@ -166,8 +171,8 @@ def run_scoring(config: dict, db_path: Path) -> list[dict]:
                 },
             )
             scored.append(merged)
-        conn.commit()
+        storage.commit()
         return scored
     finally:
-        conn.close()
+        storage.close()
 

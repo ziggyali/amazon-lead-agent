@@ -155,6 +155,19 @@ def _build_service(auth_mode: str | None = None):
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 
+def read_tab_rows(sheet_id: str, tab: str) -> list[dict[str, Any]]:
+    service = _build_service()
+    values = service.spreadsheets().values().get(spreadsheetId=sheet_id, range=f"{tab}!A:ZZ").execute().get("values", [])
+    if not values:
+        return []
+    headers = values[0]
+    rows: list[dict[str, Any]] = []
+    for row in values[1:]:
+        item = {headers[index]: row[index] if index < len(row) else "" for index in range(len(headers))}
+        rows.append(item)
+    return rows
+
+
 def _ensure_tab_exists(service, sheet_id: str, tab: str) -> None:
     spreadsheet = service.spreadsheets().get(spreadsheetId=sheet_id).execute()
     for existing in spreadsheet.get("sheets", []):

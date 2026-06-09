@@ -1,0 +1,199 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import logging
+from typing import Any
+
+from amazon_lead_agent.normalization import make_lead_id
+from amazon_lead_agent.tools import google_sheets
+
+
+LOGGER = logging.getLogger(__name__)
+
+LEAD_TABS = ("Lead Queue", "Approved Leads", "Contact Form Queue", "Rejected Leads")
+REPORT_TABS = ("Daily Reports", "Outreach Log", "Campaign Config")
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _lead_key(row: dict[str, Any]) -> str:
+    return str(row.get("id") or row.get("lead_id") or "").strip()
+
+
+def _lead_domain(row: dict[str, Any]) -> str:
+    value = str(row.get("normalized_domain") or row.get("website") or "").strip().lower()
+    return value
+
+
+def _canonical_tab_name(tab: str) -> str:
+    return tab.strip()
+
+
+@dataclass
+class SheetStore:
+    sheet_id: str
+    auth_mode: str | None = None
+    _tab_cache: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    _headers_cache: dict[str, list[str]] = field(default_factory=dict)
+    _lead_index: dict[str, dict[str, Any]] = field(default_factory=dict)
+    _domain_index: dict[str, str] = field(default_factory=dict)
+    _dirty_tabs: set[str] = field(default_factory=set)
+
+    def warm_tabs(self, tabs: list[str] | tuple[str, ...] | None = None) -> None:
+        for tab in tabs or (*LEAD_TABS, *REPORT_TABS):
+            self.read_tab(tab, refresh=True)
+
+    def read_tab(self, tab: str, refresh: bool = False) -> list[dict[str, Any]]:
+        tab = _canonical_tab_name(tab)
+        if not refresh and tab in self._tab_cache:
+            return [dict(row) for row in self._tab_cache[tab]]
+        rows = google_sheets.read_tab_rows(self.sheet_id, tab)
+        self._tab_cache[tab] = [dict(row) for row in rows]
+        if rows:
+            self._headers_cache[tab] = list(rows[0].keys())
+        for row in rows:
+            self._index_row(tab, row)
+        return [dict(row) for row in rows]
+
+    def _index_row(self, tab: str, row: dict[str, Any]) -> None:
+        lead_id = _lead_key(row)
+        if lead_id:
+            self._lead_index[lead_id] = {**self._lead_index.get(lead_id, {}), **row, "_tab": tab}
+        domain = _lead_domain(row)
+        if lead_id and domain:
+            self._domain_index[domain] = lead_id
+
+    def _remember_row(self, tab: str, row: dict[str, Any]) -> None:
+        tab = _canonical_tab_name(tab)
+        cached = self._tab_cache.setdefault(tab, [])
+        lead_id = _lead_key(row)
+        if lead_id:
+            for index, existing in enumerate(cached):
+                if _lead_key(existing) == lead_id:
+                    cached[index] = dict(row)
+                    self._index_row(tab, row)
+                    self._dirty_tabs.add(tab)
+                    return
+        cached.append(dict(row))
+        self._index_row(tab, row)
+        self._dirty_tabs.add(tab)
+
+    def get_all_leads(self) -> list[dict[str, Any]]:
+        merged: dict[str, dict[str, Any]] = {}
+        for tab in LEAD_TABS:
+            for row in self.read_tab(tab):
+                lead_id = _lead_key(row)
+                if not lead_id:
+                    continue
+                merged[lead_id] = {**merged.get(lead_id, {}), **row}
+        return list(merged.values())
+
+    def get_lead(self, lead_id: str) -> dict[str, Any] | None:
+        if not lead_id:
+            return None
+        if lead_id in self._lead_index:
+            return dict(self._lead_index[lead_id])
+        for row in self.get_all_leads():
+            if _lead_key(row) == lead_id:
+                return dict(row)
+        return None
+
+    def upsert_lead(self, lead: dict[str, Any], tab: str = "Lead Queue") -> str:
+        canonical = _canonical_tab_name(tab)
+        payload = dict(lead)
+        if not payload.get("id"):
+            company_name = payload.get("company_name") or payload.get("brand_name") or payload.get("website") or ""
+            website = payload.get("website") or ""
+            source = (payload.get("source_urls") or [payload.get("primary_source_url") or website or ""])[0]
+            payload["id"] = make_lead_id(str(company_name), str(website), str(source))
+        if not payload.get("updated_at"):
+            payload["updated_at"] = _utc_now()
+        google_sheets.append_or_update_lead(self.sheet_id, canonical, payload)
+        self._remember_row(canonical, payload)
+        status = str(payload.get("status") or "").strip().lower()
+        if canonical != "Lead Queue":
+            google_sheets.append_or_update_lead(self.sheet_id, "Lead Queue", payload)
+            self._remember_row("Lead Queue", payload)
+        if status == "approved":
+            google_sheets.append_or_update_lead(self.sheet_id, "Approved Leads", payload)
+            self._remember_row("Approved Leads", payload)
+        elif status == "contact_form_queue":
+            google_sheets.append_or_update_lead(self.sheet_id, "Contact Form Queue", payload)
+            self._remember_row("Contact Form Queue", payload)
+        elif status == "rejected":
+            google_sheets.append_or_update_lead(self.sheet_id, "Rejected Leads", payload)
+            self._remember_row("Rejected Leads", payload)
+        return str(payload.get("id") or "")
+
+    def record_outreach_event(self, event: dict[str, Any]) -> None:
+        google_sheets.append_outreach_log(self.sheet_id, event)
+        self._remember_row(
+            "Outreach Log",
+            {
+                "lead_id": event.get("lead_id", ""),
+                "event_type": event.get("event_type", ""),
+                "subject": event.get("subject", ""),
+                "draft_id": event.get("draft_id", ""),
+                "metadata": event.get("metadata", {}),
+                "created_at": event.get("created_at", _utc_now()),
+            },
+        )
+
+    def append_daily_report(self, report: dict[str, Any]) -> None:
+        google_sheets.append_daily_report(self.sheet_id, report)
+        self._remember_row("Daily Reports", report)
+
+    def mark_draft_created(self, lead_id: str, draft_id: str) -> None:
+        lead = self.get_lead(lead_id) or {"id": lead_id}
+        lead.update(
+            {
+                "draft_id": draft_id,
+                "drafted": 1,
+                "status": "drafted",
+                "send_status": "drafted",
+                "updated_at": _utc_now(),
+            }
+        )
+        self.upsert_lead(lead, tab="Approved Leads")
+
+    def get_leads_for_enrichment(self, limit: int) -> list[dict[str, Any]]:
+        leads = [lead for lead in self.get_all_leads() if str(lead.get("status", "")).lower() in {"new", "discovered", "extraction_error"}]
+        leads.sort(key=lambda item: str(item.get("created_at") or item.get("updated_at") or ""))
+        return leads[:limit]
+
+    def get_leads_for_scoring(self, limit: int) -> list[dict[str, Any]]:
+        leads = [lead for lead in self.get_all_leads() if str(lead.get("status", "")).lower() in {"enriched", "extraction_error", "discovered", "scoring_error"}]
+        leads.sort(key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""))
+        return leads[:limit]
+
+    def get_leads_for_drafting(self, min_score: int, limit: int) -> list[dict[str, Any]]:
+        leads = [
+            lead
+            for lead in self.get_all_leads()
+            if int(lead.get("drafted") or 0) == 0
+            and int(lead.get("score") or 0) >= min_score
+            and bool(lead.get("has_email") or lead.get("public_emails"))
+            and bool(lead.get("contact_path_exists") or lead.get("contact_page_url"))
+            and bool(lead.get("amazon_backlink_found") or lead.get("amazon_links"))
+            and str(lead.get("status", "")).lower() in {"scored", "enriched", "approved", "contact_form_queue"}
+        ]
+        leads.sort(key=lambda item: (-int(item.get("score") or 0), str(item.get("updated_at") or item.get("created_at") or "")))
+        return leads[:limit]
+
+    def commit(self) -> None:
+        # Sheets writes are immediate; cache remains in-memory.
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "sheet_id": self.sheet_id,
+            "lead_count": len(self._lead_index),
+            "dirty_tabs": sorted(self._dirty_tabs),
+            "tabs": {tab: len(rows) for tab, rows in self._tab_cache.items()},
+        }

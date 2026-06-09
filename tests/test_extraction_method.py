@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import os
 from pathlib import Path
 from unittest.mock import patch
 from types import SimpleNamespace
@@ -82,6 +83,44 @@ class ExtractionMethodTests(unittest.TestCase):
 
         self.assertEqual(profile["extraction_method"], "scrapegraphai_other")
         self.assertEqual(profile["company_name"], "Example Brand")
+
+    @patch("amazon_lead_agent.tools.scrapegraph_runner._build_snapshot")
+    def test_scrapegraph_success_with_minimax_config_is_labeled_minimax(self, mock_snapshot) -> None:
+        mock_snapshot.return_value = {
+            "url": "https://example.com",
+            "html": "<html></html>",
+            "text": "Example text",
+            "links": [],
+            "amazon_links": [],
+            "contact_links": [],
+            "public_emails": [],
+            "blocked": False,
+            "title": "Example Brand",
+            "source_urls": ["https://example.com"],
+        }
+
+        class FakeSmartScraperGraph:
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+
+            def run(self):
+                return {
+                    "company_name": "Example Brand",
+                    "brand_name": "Example Brand",
+                    "website": "https://example.com",
+                    "source_urls": ["https://example.com"],
+                }
+
+        fake_module = SimpleNamespace(SmartScraperGraph=FakeSmartScraperGraph)
+        with patch.dict(
+            sys.modules,
+            {"scrapegraphai": SimpleNamespace(graphs=fake_module), "scrapegraphai.graphs": fake_module},
+        ), patch.dict(os.environ, {"MINIMAX_API_KEY": "test-key", "SCRAPEGRAPHAI_LLM_PROVIDER": "minimax"}, clear=False):
+            profile = extract_brand_profile("https://example.com", minimax_api_key="test", llm_config={"provider": "minimax", "minimax_model": "MiniMax-M3"})
+
+        self.assertEqual(profile["extraction_method"], "scrapegraphai_minimax")
+        self.assertEqual(profile["llm_provider_used"], "minimax")
 
     @patch("amazon_lead_agent.tools.scrapegraph_runner._build_snapshot")
     def test_router_gemini_success_is_labeled_gemini_direct(self, mock_snapshot) -> None:

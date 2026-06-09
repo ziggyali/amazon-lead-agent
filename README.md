@@ -9,7 +9,7 @@ It finds DTC brands in:
 - Home & Kitchen
 - Health / Supplements
 
-It then enriches leads, stores canonical records in SQLite, mirrors results to Google Sheets, and creates Gmail drafts only for qualified leads.
+It then enriches leads, stores canonical records in Google Sheets by default, keeps SQLite as an optional local cache, and creates Gmail drafts only for qualified leads.
 
 ## Operating model
 
@@ -51,7 +51,8 @@ bash scripts/run_local.sh
 - Direct MiniMax API is supported.
 - ScrapeGraphAI is optional and used when it works locally.
 - OpenAI is optional and requires a real OpenAI API key from the OpenAI platform. ChatGPT Business alone may not include API access.
-- Google Sheets supports either service-account auth or Workspace OAuth for Hermes-created sheets.
+- Google Sheets is the primary source of truth. OAuth is the preferred auth mode for Hermes-created sheets, with service accounts available as a fallback.
+- SQLite is optional debug cache only unless you explicitly enable it.
 
 See `LOCAL_SETUP.md` for exact environment variables and verification commands.
 

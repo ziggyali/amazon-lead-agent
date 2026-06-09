@@ -3,14 +3,20 @@ from __future__ import annotations
 from pathlib import Path
 
 from amazon_lead_agent.tools.scrapegraph_runner import extract_brand_profile
-from amazon_lead_agent.tools.sqlite_store import get_connection, get_leads_for_enrichment, upsert_lead, record_outreach_event
+from amazon_lead_agent.tools.storage_router import StorageRouter, get_storage_router
 
 
-def run_extraction(config: dict, db_path: Path) -> list[dict]:
-    conn = get_connection(db_path)
+def _storage(config: dict, storage_or_path: Path | StorageRouter) -> StorageRouter:
+    if isinstance(storage_or_path, StorageRouter):
+        return storage_or_path
+    return get_storage_router(config, storage_or_path)
+
+
+def run_extraction(config: dict, db_path: Path | StorageRouter) -> list[dict]:
+    storage = _storage(config, db_path)
     enriched: list[dict] = []
     try:
-        candidates = get_leads_for_enrichment(conn, int(config["campaign"]["daily_discovery_limit"]))
+        candidates = storage.get_leads_for_enrichment(int(config["campaign"]["daily_discovery_limit"]))
         minimax_key = __import__("os").environ.get("MINIMAX_API_KEY", "")
         for lead in candidates:
             try:
@@ -22,11 +28,10 @@ def run_extraction(config: dict, db_path: Path) -> list[dict]:
                     "extraction_fallback": int(profile.get("extraction_method") != "scrapegraphai_other"),
                     "blocked_or_error": int(profile.get("extraction_method") == "blocked_or_error"),
                 }
-                upsert_lead(conn, merged)
-                record_outreach_event(conn, {"lead_id": lead["id"], "event_type": "enriched", "metadata": profile})
+                storage.upsert_lead(merged, tab="Lead Queue")
+                storage.record_outreach_event({"lead_id": lead["id"], "event_type": "enriched", "metadata": profile})
                 if profile.get("extraction_method") and profile.get("extraction_method") != "scrapegraphai_other":
-                    record_outreach_event(
-                        conn,
+                    storage.record_outreach_event(
                         {
                             "lead_id": lead["id"],
                             "event_type": "extraction_fallback",
@@ -36,11 +41,11 @@ def run_extraction(config: dict, db_path: Path) -> list[dict]:
                 enriched.append(merged)
             except Exception as exc:  # noqa: BLE001
                 merged = {**lead, "status": "extraction_error", "blocked_or_error": 1, "notes": str(exc), "extraction_method": "blocked_or_error"}
-                upsert_lead(conn, merged)
-                record_outreach_event(conn, {"lead_id": lead["id"], "event_type": "error", "metadata": {"error": str(exc)}})
+                storage.upsert_lead(merged, tab="Lead Queue")
+                storage.record_outreach_event({"lead_id": lead["id"], "event_type": "error", "metadata": {"error": str(exc)}})
                 enriched.append(merged)
-        conn.commit()
+        storage.commit()
         return enriched
     finally:
-        conn.close()
+        storage.close()
 

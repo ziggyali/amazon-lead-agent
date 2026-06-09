@@ -5,7 +5,7 @@ from pathlib import Path
 from amazon_lead_agent.normalization import make_lead_id, normalize_company_name
 from amazon_lead_agent.tools.amazon_backlink_discovery import contains_amazon_buying_signal
 from amazon_lead_agent.tools.search import discover_candidates, get_last_search_stats
-from amazon_lead_agent.tools.sqlite_store import get_connection, upsert_lead, record_outreach_event
+from amazon_lead_agent.tools.storage_router import StorageRouter, get_storage_router
 
 
 def _candidate_from_result(result: dict[str, str], category: str) -> dict[str, object]:
@@ -29,8 +29,14 @@ def _candidate_from_result(result: dict[str, str], category: str) -> dict[str, o
     }
 
 
-def run_discovery(config: dict, db_path: Path) -> dict:
-    conn = get_connection(db_path)
+def _storage(config: dict, storage_or_path: Path | StorageRouter) -> StorageRouter:
+    if isinstance(storage_or_path, StorageRouter):
+        return storage_or_path
+    return get_storage_router(config, storage_or_path)
+
+
+def run_discovery(config: dict, db_path: Path | StorageRouter) -> dict:
+    storage = _storage(config, db_path)
     discovered: list[dict] = []
     try:
         categories = config["campaign"]["categories"]
@@ -38,9 +44,8 @@ def run_discovery(config: dict, db_path: Path) -> dict:
         results = discover_candidates(categories, limit)
         for result in results:
             lead = _candidate_from_result(result, result.get("category", ""))
-            lead_id = upsert_lead(conn, lead)
-            record_outreach_event(
-                conn,
+            lead_id = storage.upsert_lead(lead, tab="Lead Queue")
+            storage.record_outreach_event(
                 {
                     "lead_id": lead_id,
                     "event_type": "discovered",
@@ -48,8 +53,8 @@ def run_discovery(config: dict, db_path: Path) -> dict:
                 },
             )
             discovered.append({**lead, "id": lead_id})
-        conn.commit()
+        storage.commit()
         return {"leads": discovered, "search_stats": get_last_search_stats()}
     finally:
-        conn.close()
+        storage.close()
 

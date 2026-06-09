@@ -1,6 +1,6 @@
+import os
 import tempfile
 import unittest
-import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -54,9 +54,7 @@ class DryRunTests(unittest.TestCase):
             finally:
                 conn.close()
 
-    @patch("amazon_lead_agent.runtime.append_daily_report")
-    @patch("amazon_lead_agent.runtime.append_outreach_log")
-    @patch("amazon_lead_agent.runtime.append_or_update_lead")
+    @patch("amazon_lead_agent.runtime.get_storage_router")
     @patch("amazon_lead_agent.runtime.run_outreach", return_value=[])
     @patch("amazon_lead_agent.runtime.run_scoring")
     @patch("amazon_lead_agent.runtime.run_extraction")
@@ -67,32 +65,78 @@ class DryRunTests(unittest.TestCase):
         mock_extraction,
         mock_scoring,
         mock_outreach,
-        mock_append_lead,
-        mock_append_outreach,
-        mock_append_report,
+        mock_get_storage_router,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "leads.db"
             init_db(db_path)
-            mock_discovery.return_value = {
-                "leads": [
-                    {
-                        "id": "lead-1",
-                        "company_name": "Acme",
-                        "website": "https://example.com",
-                        "status": "discovered",
+
+            class FakeStorage:
+                uses_sheets = True
+
+                def __init__(self):
+                    self.upserts = []
+                    self.outreach = []
+                    self.reports = []
+                    self.sheet_mirror_error_count = 0
+                    self.failed_sheet_rows = []
+
+                def upsert_lead(self, lead, tab=None):
+                    self.upserts.append((tab, lead))
+                    return lead.get("id", "lead-1")
+
+                def record_outreach_event(self, event):
+                    self.outreach.append(event)
+
+                def get_leads_for_enrichment(self, limit):
+                    return []
+
+                def get_leads_for_scoring(self, limit):
+                    return []
+
+                def get_leads_for_drafting(self, min_score, limit):
+                    return []
+
+                def append_daily_report(self, report):
+                    self.reports.append(report)
+
+                def snapshot(self):
+                    return {
+                        "sheet_mirror_error_count": self.sheet_mirror_error_count,
+                        "failed_sheet_rows": self.failed_sheet_rows,
+                        "uses_sheets": True,
                     }
-                ],
-                "search_stats": {
-                    "provider_counts": {"duckduckgo": 1},
-                    "blocked_query_counts": {"duckduckgo": 0},
-                    "rate_limited_query_counts": {"duckduckgo": 0},
-                    "rejected_content_domains_count": 0,
-                    "rejected_listicle_domains_count": 0,
-                },
-            }
-            mock_extraction.return_value = [
-                {
+
+                def commit(self):
+                    return None
+
+                def close(self):
+                    return None
+
+            fake_storage = FakeStorage()
+            mock_get_storage_router.return_value = fake_storage
+            def discover_side_effect(config, storage):
+                lead = {
+                    "id": "lead-1",
+                    "company_name": "Acme",
+                    "website": "https://example.com",
+                    "status": "discovered",
+                }
+                storage.upsert_lead(lead, tab="Lead Queue")
+                storage.record_outreach_event({"lead_id": "lead-1", "event_type": "discovered", "metadata": {"status": "discovered"}})
+                return {
+                    "leads": [lead],
+                    "search_stats": {
+                        "provider_counts": {"duckduckgo": 1},
+                        "blocked_query_counts": {"duckduckgo": 0},
+                        "rate_limited_query_counts": {"duckduckgo": 0},
+                        "rejected_content_domains_count": 0,
+                        "rejected_listicle_domains_count": 0,
+                    },
+                }
+
+            def extraction_side_effect(config, storage):
+                lead = {
                     "id": "lead-1",
                     "company_name": "Acme",
                     "website": "https://example.com",
@@ -101,9 +145,12 @@ class DryRunTests(unittest.TestCase):
                     "llm_provider_used": "gemini",
                     "llm_model_used": "gemini-2.5-flash",
                 }
-            ]
-            mock_scoring.return_value = [
-                {
+                storage.upsert_lead(lead, tab="Lead Queue")
+                storage.record_outreach_event({"lead_id": "lead-1", "event_type": "enriched", "metadata": lead})
+                return [lead]
+
+            def scoring_side_effect(config, storage):
+                approved = {
                     "id": "lead-1",
                     "company_name": "Acme",
                     "website": "https://example.com",
@@ -113,8 +160,9 @@ class DryRunTests(unittest.TestCase):
                     "public_emails": ["hello@example.com"],
                     "contact_page_url": "https://example.com/contact",
                     "extraction_method": "gemini_direct",
-                },
-                {
+                    "send_status": "pending",
+                }
+                rejected = {
                     "id": "lead-2",
                     "company_name": "Brand Two",
                     "website": "https://brandtwo.com",
@@ -122,8 +170,8 @@ class DryRunTests(unittest.TestCase):
                     "score": 20,
                     "tier": "Reject",
                     "extraction_method": "blocked_or_error",
-                },
-                {
+                }
+                contact_queue = {
                     "id": "lead-3",
                     "company_name": "Brand Three",
                     "website": "https://brandthree.com",
@@ -133,8 +181,15 @@ class DryRunTests(unittest.TestCase):
                     "contact_page_url": "https://brandthree.com/contact",
                     "public_emails": [],
                     "extraction_method": "minimax_direct_m3",
-                },
-            ]
+                }
+                storage.upsert_lead(approved, tab="Approved Leads")
+                storage.upsert_lead(rejected, tab="Rejected Leads")
+                storage.upsert_lead(contact_queue, tab="Contact Form Queue")
+                return [approved, rejected, contact_queue]
+
+            mock_discovery.side_effect = discover_side_effect
+            mock_extraction.side_effect = extraction_side_effect
+            mock_scoring.side_effect = scoring_side_effect
             config = {
                 "storage": {"google_sheet_id": "sheet-123"},
                 "campaign": {"minimum_score_for_draft": 75, "daily_draft_limit": 10, "daily_discovery_limit": 10},
@@ -144,24 +199,22 @@ class DryRunTests(unittest.TestCase):
             report = run_campaign(config, db_path, mode="full", dry_run=True)
 
             self.assertEqual(report["drafts_created"], 0)
-            self.assertGreater(mock_append_lead.call_count, 0)
-            self.assertTrue(mock_append_report.called)
-            tabs = [call.args[1] for call in mock_append_lead.call_args_list]
+            self.assertGreater(len(fake_storage.upserts), 0)
+            self.assertGreater(len(fake_storage.reports), 0)
+            tabs = [tab for tab, _ in fake_storage.upserts]
             self.assertIn("Lead Queue", tabs)
             self.assertIn("Approved Leads", tabs)
             self.assertIn("Contact Form Queue", tabs)
             self.assertIn("Rejected Leads", tabs)
             mock_outreach.assert_called_once()
-            self.assertFalse(any("draft_created" in str(call.args) for call in mock_append_outreach.call_args_list))
+            self.assertFalse(any(event.get("event_type") == "draft_created" for event in fake_storage.outreach))
             self.assertEqual(report["search_provider_counts"], {"duckduckgo": 1})
             self.assertEqual(report["provider_blocked_counts"], {"duckduckgo": 0})
             self.assertEqual(report["queries_attempted_by_provider"], {"duckduckgo": 1})
             self.assertEqual(report["cleaned_redirect_count"], 0)
             self.assertEqual(report["rejected_redirect_count"], 0)
 
-    @patch("amazon_lead_agent.runtime.append_daily_report")
-    @patch("amazon_lead_agent.runtime.append_outreach_log")
-    @patch("amazon_lead_agent.runtime.append_or_update_lead", side_effect=ValueError("Invalid values[1][16]"))
+    @patch("amazon_lead_agent.runtime.get_storage_router")
     @patch("amazon_lead_agent.runtime.run_outreach", return_value=[])
     @patch("amazon_lead_agent.runtime.run_scoring", return_value=[])
     @patch("amazon_lead_agent.runtime.run_extraction", return_value=[])
@@ -172,9 +225,7 @@ class DryRunTests(unittest.TestCase):
         mock_extraction,
         mock_scoring,
         mock_outreach,
-        mock_append_lead,
-        mock_append_outreach,
-        mock_append_report,
+        mock_get_storage_router,
     ) -> None:
         mock_discovery.return_value = {
             "leads": [
@@ -200,6 +251,46 @@ class DryRunTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "leads.db"
             init_db(db_path)
+
+            class FailingStorage:
+                uses_sheets = True
+
+                def __init__(self):
+                    self.failed_sheet_rows = [{"tab": "Lead Queue", "error": "Invalid values[1][16]"}]
+                    self.sheet_mirror_error_count = 1
+
+                def upsert_lead(self, lead, tab=None):
+                    raise ValueError("Invalid values[1][16]")
+
+                def record_outreach_event(self, event):
+                    raise ValueError("Invalid values[1][16]")
+
+                def get_leads_for_enrichment(self, limit):
+                    return []
+
+                def get_leads_for_scoring(self, limit):
+                    return []
+
+                def get_leads_for_drafting(self, min_score, limit):
+                    return []
+
+                def append_daily_report(self, report):
+                    raise ValueError("Invalid values[1][16]")
+
+                def snapshot(self):
+                    return {
+                        "sheet_mirror_error_count": self.sheet_mirror_error_count,
+                        "failed_sheet_rows": self.failed_sheet_rows,
+                        "uses_sheets": True,
+                    }
+
+                def commit(self):
+                    return None
+
+                def close(self):
+                    return None
+
+            mock_get_storage_router.return_value = FailingStorage()
             old_cwd = os.getcwd()
             os.chdir(tmpdir)
             try:
@@ -215,10 +306,10 @@ class DryRunTests(unittest.TestCase):
                 )
             finally:
                 os.chdir(old_cwd)
-            self.assertEqual(report["sheet_mirror_error_count"], 1)
+            self.assertGreaterEqual(report["sheet_mirror_error_count"], 1)
             self.assertTrue(report["failed_sheet_rows"])
             self.assertTrue(Path(tmpdir, "campaign_report.md").exists())
-            self.assertTrue(mock_append_report.called)
+            self.assertTrue(report["campaign_report_path"])
 
 
 if __name__ == "__main__":

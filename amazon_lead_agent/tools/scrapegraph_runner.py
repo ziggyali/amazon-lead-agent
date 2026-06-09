@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import re
-from urllib.parse import urljoin
 
 from amazon_lead_agent.llm.router import LLMRouter
 from amazon_lead_agent.prompts import load_prompt
@@ -152,7 +151,7 @@ def _normalize_profile(profile: dict, url: str, snapshot: dict, extraction_metho
     return profile
 
 
-def _scrapegraph_attempt(url: str, snapshot: dict) -> tuple[dict | None, str | None]:
+def _scrapegraph_attempt(url: str, snapshot: dict, llm_config: dict | None = None) -> tuple[dict | None, str | None]:
     try:
         from scrapegraphai.graphs import SmartScraperGraph
     except Exception as exc:  # noqa: BLE001
@@ -160,13 +159,29 @@ def _scrapegraph_attempt(url: str, snapshot: dict) -> tuple[dict | None, str | N
         return None, str(exc)
     try:
         prompt = load_prompt("extract_brand.md")
+        graph_config = {
+            "headless": True,
+            "verbose": False,
+        }
+        llm_config = llm_config or {}
+        use_minimax = str(llm_config.get("provider") or os.environ.get("SCRAPEGRAPHAI_LLM_PROVIDER", "minimax")).strip().lower() == "minimax"
+        minimax_key = str(os.environ.get("MINIMAX_API_KEY", "") or llm_config.get("minimax_api_key") or "").strip()
+        if use_minimax and minimax_key:
+            graph_config["llm"] = {
+                "api_key": minimax_key,
+                "model": str(llm_config.get("minimax_model") or os.environ.get("MINIMAX_MODEL", "MiniMax-M3")),
+                "base_url": str(llm_config.get("minimax_api_base") or os.environ.get("MINIMAX_API_BASE", "https://api.minimax.io/v1/text/chatcompletion_v2")),
+                "temperature": 0,
+                "format": "json",
+                "model_tokens": int(llm_config.get("minimax_max_tokens_research") or os.environ.get("MINIMAX_MAX_TOKENS_RESEARCH", "2048")),
+            }
+            extraction_method = "scrapegraphai_minimax"
+        else:
+            extraction_method = "scrapegraphai_other"
         graph = SmartScraperGraph(
             prompt=prompt,
             source=url,
-            config={
-                "headless": True,
-                "verbose": False,
-            },
+            config=graph_config,
         )
         result = graph.run()
         if isinstance(result, str):
@@ -175,10 +190,14 @@ def _scrapegraph_attempt(url: str, snapshot: dict) -> tuple[dict | None, str | N
             parsed = result
         else:
             parsed = {"result": result}
-        # The public ScrapeGraphAI docs do not document a MiniMax provider config.
-        # Label the extraction conservatively unless an explicit, verified MiniMax
-        # integration is added later.
-        return _normalize_profile(parsed, url, snapshot, "scrapegraphai_other"), None
+        profile = _normalize_profile(parsed, url, snapshot, extraction_method)
+        if extraction_method == "scrapegraphai_minimax":
+            profile["llm_provider_used"] = "minimax"
+            profile["llm_model_used"] = str(llm_config.get("minimax_model") or os.environ.get("MINIMAX_MODEL", "MiniMax-M3"))
+        else:
+            profile["llm_provider_used"] = profile.get("llm_provider_used", "")
+            profile["llm_model_used"] = profile.get("llm_model_used", "")
+        return profile, None
     except Exception as exc:  # noqa: BLE001
         message = str(exc)
         LOGGER.warning("ScrapeGraphAI extraction failed for %s: %s", url, message)
@@ -223,7 +242,7 @@ def extract_brand_profile(url: str, minimax_api_key: str | None = None, llm_conf
         blocked_profile["extraction_error"] = "public page appears blocked or challenged"
         return blocked_profile
 
-    scrapegraph_profile, scrapegraph_error = _scrapegraph_attempt(url, snapshot)
+    scrapegraph_profile, scrapegraph_error = _scrapegraph_attempt(url, snapshot, llm_config=llm_config)
     if scrapegraph_profile:
         scrapegraph_profile["scrapegraph_error"] = scrapegraph_error or ""
         scrapegraph_profile["extraction_error"] = ""

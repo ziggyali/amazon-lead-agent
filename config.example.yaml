@@ -16,6 +16,8 @@ sender:
   offer: We take the messy, time-consuming operational work off your plate and keep your Amazon account clean, compliant, and conversion-ready.
 
 storage:
+  storage_mode: sheets
+  local_cache_enabled: false
   sqlite_path: data/leads.db
   google_sheet_id: REPLACE_ME
 

@@ -8,6 +8,7 @@ Hermes should:
 - Run the local wrapper script in this repo: `scripts/run_local.ps1` on Windows or `scripts/run_local.sh` on macOS/Linux.
 - Read `logs/latest.log` and `campaign_report.md`.
 - Schedule recurring runs locally.
+- Treat Google Sheets as the live source of truth and SQLite as optional cache only.
 - Never modify code unless explicitly asked.
 - Never send emails.
 - Never commit secrets.

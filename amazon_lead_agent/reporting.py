@@ -46,12 +46,14 @@ def _coerce_summary(summary: dict | None) -> dict:
     return summary or {}
 
 
-def write_campaign_report(db_path: str | Path, output_path: str | Path = "campaign_report.md", summary: dict | None = None) -> dict:
-    conn = get_connection(db_path)
+def write_campaign_report(db_path: str | Path | None, output_path: str | Path = "campaign_report.md", summary: dict | None = None) -> dict:
+    conn = get_connection(db_path) if db_path and Path(db_path).exists() else None
     try:
-        report = _coerce_summary(summary) or _latest_report(conn)
+        report = _coerce_summary(summary)
+        if not report and conn is not None:
+            report = _latest_report(conn)
         notes = _parse_notes(report.get("notes_json") or report.get("notes", ""))
-        top = _top_leads(conn)
+        top = report.get("top_5_leads") or (_top_leads(conn) if conn is not None else [])
         body = [
             "# Campaign Report",
             "",
@@ -88,4 +90,5 @@ def write_campaign_report(db_path: str | Path, output_path: str | Path = "campai
         Path(output_path).write_text(rendered, encoding="utf-8")
         return {"report": report, "top_leads": top, "path": str(output_path)}
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()

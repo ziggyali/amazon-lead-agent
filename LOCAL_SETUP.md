@@ -25,6 +25,8 @@ bash scripts/install_local.sh
 
 Fill these values in `.env`:
 
+- `STORAGE_MODE=sheets`
+- `LOCAL_CACHE_ENABLED=false`
 - `MINIMAX_API_KEY`
 - `MINIMAX_API_STYLE=chatcompletion_v2`
 - `MINIMAX_MODEL=MiniMax-M3`
@@ -32,7 +34,7 @@ Fill these values in `.env`:
 - `GOOGLE_SERVICE_ACCOUNT_FILE` or `GOOGLE_SERVICE_ACCOUNT_JSON`
 - `GOOGLE_OAUTH_CREDENTIALS_FILE`
 - `GOOGLE_OAUTH_TOKEN_FILE`
-- `GOOGLE_SHEETS_AUTH_MODE=auto`
+- `GOOGLE_SHEETS_AUTH_MODE=oauth`
 - `GOOGLE_SHEET_ID`
 - `GMAIL_SENDER_EMAIL`
 - `GMAIL_CREDENTIALS_FILE`
@@ -48,6 +50,8 @@ Use the fallback model only if the primary MiniMax-M3 request fails.
 
 Update:
 
+- `storage.storage_mode`
+- `storage.local_cache_enabled`
 - `storage.sqlite_path`
 - `storage.google_sheet_id`
 - `campaign.daily_discovery_limit`

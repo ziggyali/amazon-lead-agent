@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 
 from amazon_lead_agent.config import load_config, get_storage_path
-from amazon_lead_agent.tools.sqlite_store import init_db
 from amazon_lead_agent.runtime import run_campaign
 
 
@@ -28,7 +27,6 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config(args.config)
 
     db_path = get_storage_path(config)
-    init_db(db_path)
     if args.dry_run:
         print("DRY RUN enabled: Gmail drafts will not be created.")
     report = run_campaign(config, db_path, mode=args.mode, dry_run=args.dry_run)

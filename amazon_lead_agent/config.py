@@ -22,6 +22,8 @@ DEFAULT_CONFIG = {
         "offer": "We take the messy, time-consuming operational work off your plate and keep your Amazon account clean, compliant, and conversion-ready.",
     },
     "storage": {
+        "storage_mode": "sheets",
+        "local_cache_enabled": False,
         "sqlite_path": "data/leads.db",
         "google_sheet_id": "",
     },
@@ -87,6 +89,8 @@ def _set_path(config: dict[str, Any], path: tuple[str, ...], value: Any) -> None
 
 def apply_env_overrides(config: dict[str, Any]) -> dict[str, Any]:
     env_map = {
+        "STORAGE_MODE": ("storage", "storage_mode"),
+        "LOCAL_CACHE_ENABLED": ("storage", "local_cache_enabled"),
         "GOOGLE_SHEET_ID": ("storage", "google_sheet_id"),
         "DAILY_DISCOVERY_LIMIT": ("campaign", "daily_discovery_limit"),
         "DAILY_DRAFT_LIMIT": ("campaign", "daily_draft_limit"),

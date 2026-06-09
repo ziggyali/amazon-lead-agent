@@ -4,8 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from amazon_lead_agent.tools.gmail_drafts import create_gmail_draft
-from amazon_lead_agent.tools.google_sheets import append_or_update_lead, append_outreach_log
-from amazon_lead_agent.tools.sqlite_store import get_connection, get_leads_for_drafting, mark_draft_created, record_outreach_event, upsert_lead
+from amazon_lead_agent.tools.storage_router import StorageRouter, get_storage_router
 
 
 def compose_subject(lead: dict) -> str:
@@ -41,16 +40,19 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def run_outreach(config: dict, db_path: Path, dry_run: bool = False) -> list[dict]:
-    conn = get_connection(db_path)
+def _storage(config: dict, storage_or_path: Path | StorageRouter) -> StorageRouter:
+    if isinstance(storage_or_path, StorageRouter):
+        return storage_or_path
+    return get_storage_router(config, storage_or_path)
+
+
+def run_outreach(config: dict, db_path: Path | StorageRouter, dry_run: bool = False) -> list[dict]:
+    storage = _storage(config, db_path)
     drafts: list[dict] = []
     try:
-        sheet_id = config["storage"].get("google_sheet_id", "")
-        if sheet_id in {"", "REPLACE_ME"}:
-            sheet_id = ""
         min_score = int(config["campaign"]["minimum_score_for_draft"])
         limit = int(config["campaign"]["daily_draft_limit"])
-        candidates = get_leads_for_drafting(conn, min_score=min_score, limit=limit)
+        candidates = storage.get_leads_for_drafting(min_score=min_score, limit=limit)
         sender_name = config["sender"]["name"]
         sender_offer = config["sender"]["offer"]
         sender_email = __import__("os").environ.get("GMAIL_SENDER_EMAIL", "")
@@ -80,9 +82,8 @@ def run_outreach(config: dict, db_path: Path, dry_run: bool = False) -> list[dic
                     "review_status": "previewed",
                     "updated_at": _now(),
                 }
-                upsert_lead(conn, merged)
-                record_outreach_event(
-                    conn,
+                storage.upsert_lead(merged, tab="Approved Leads")
+                storage.record_outreach_event(
                     {
                         "lead_id": lead["id"],
                         "event_type": "draft_preview",
@@ -92,9 +93,6 @@ def run_outreach(config: dict, db_path: Path, dry_run: bool = False) -> list[dic
                         "metadata": {"recipient": recipient, "sender_email": sender_email, "mode": mode_label},
                     },
                 )
-                if sheet_id:
-                    append_or_update_lead(sheet_id, "Approved Leads", {**lead, "draft_preview_subject": subject, "draft_preview_body": body, "send_status": "draft_preview"})
-                    append_outreach_log(sheet_id, {"lead_id": lead["id"], "event_type": "draft_preview", "subject": subject, "draft_id": preview_id, "metadata": {"mode": mode_label}})
                 drafts.append({**lead, "draft_preview_subject": subject, "draft_preview_body": body, "send_status": "draft_preview", "draft_id": preview_id})
                 continue
 
@@ -108,10 +106,9 @@ def run_outreach(config: dict, db_path: Path, dry_run: bool = False) -> list[dic
                 "review_status": "drafted",
                 "updated_at": _now(),
             }
-            upsert_lead(conn, merged)
-            mark_draft_created(conn, lead["id"], draft_id)
-            record_outreach_event(
-                conn,
+            storage.upsert_lead(merged, tab="Approved Leads")
+            storage.mark_draft_created(lead["id"], draft_id)
+            storage.record_outreach_event(
                 {
                     "lead_id": lead["id"],
                     "event_type": "draft_created",
@@ -121,11 +118,8 @@ def run_outreach(config: dict, db_path: Path, dry_run: bool = False) -> list[dic
                     "metadata": {"recipient": recipient, "sender_email": sender_email},
                 },
             )
-            if sheet_id:
-                append_or_update_lead(sheet_id, "Approved Leads", {**lead, "draft_id": draft_id, "draft_subject": subject, "draft_body": body, "send_status": "drafted", "status": "drafted"})
-                append_outreach_log(sheet_id, {"lead_id": lead["id"], "event_type": "draft_created", "subject": subject, "draft_id": draft_id})
             drafts.append({**lead, "draft_id": draft_id, "draft_subject": subject, "draft_body": body, "send_status": "drafted"})
-        conn.commit()
+        storage.commit()
         return drafts
     finally:
-        conn.close()
+        storage.close()
