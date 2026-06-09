@@ -42,32 +42,40 @@ def _parse_notes(notes: str | None) -> dict:
         return {}
 
 
-def write_campaign_report(db_path: str | Path, output_path: str | Path = "campaign_report.md") -> dict:
+def _coerce_summary(summary: dict | None) -> dict:
+    return summary or {}
+
+
+def write_campaign_report(db_path: str | Path, output_path: str | Path = "campaign_report.md", summary: dict | None = None) -> dict:
     conn = get_connection(db_path)
     try:
-        report = _latest_report(conn)
-        notes = _parse_notes(report.get("notes", ""))
+        report = _coerce_summary(summary) or _latest_report(conn)
+        notes = _parse_notes(report.get("notes_json") or report.get("notes", ""))
         top = _top_leads(conn)
         body = [
             "# Campaign Report",
             "",
-            f"- discovered_count: {report.get('discovery_count', 0)}",
-            f"- enriched_count: {report.get('enrichment_count', 0)}",
-            f"- scored_count: {report.get('scoring_count', 0)}",
+            f"- discovered_count: {report.get('discovered_count', report.get('discovery_count', 0))}",
+            f"- enriched_count: {report.get('enriched_count', report.get('enrichment_count', 0))}",
+            f"- scored_count: {report.get('scored_count', report.get('scoring_count', 0))}",
             f"- approved_count: {report.get('approved_count', 0)}",
             f"- rejected_count: {report.get('rejected_count', 0)}",
-            f"- drafts_created: {report.get('draft_count', 0)}",
+            f"- drafts_created: {report.get('drafts_created', report.get('draft_count', 0))}",
             f"- contact_form_queue_count: {report.get('contact_form_queue_count', 0)}",
             f"- extraction_fallback_count: {report.get('extraction_fallback_count', 0)}",
             f"- errors: {report.get('errors', 0)}",
-            f"- sheet_mirror_status: {notes.get('sheet_mirror_status', '')}",
-            f"- search_provider_counts: {json.dumps(notes.get('search_provider_counts', {}), sort_keys=True)}",
-            f"- search_blocked_query_counts: {json.dumps(notes.get('search_blocked_query_counts', {}), sort_keys=True)}",
-            f"- search_rate_limited_query_counts: {json.dumps(notes.get('search_rate_limited_query_counts', {}), sort_keys=True)}",
-            f"- rejected_content_domains_count: {notes.get('rejected_content_domains_count', 0)}",
-            f"- rejected_listicle_domains_count: {notes.get('rejected_listicle_domains_count', 0)}",
-            f"- llm_provider_counts: {json.dumps(notes.get('llm_provider_counts', {}), sort_keys=True)}",
-            f"- llm_model_counts: {json.dumps(notes.get('llm_model_counts', {}), sort_keys=True)}",
+            f"- sheet_mirror_status: {report.get('sheet_mirror_status', notes.get('sheet_mirror_status', ''))}",
+            f"- sheet_mirror_error_count: {report.get('sheet_mirror_error_count', notes.get('sheet_mirror_error_count', 0))}",
+            f"- failed_sheet_rows: {json.dumps(report.get('failed_sheet_rows', notes.get('failed_sheet_rows', [])), ensure_ascii=False)}",
+            f"- search_provider_counts: {json.dumps(report.get('search_provider_counts', notes.get('search_provider_counts', {})), sort_keys=True)}",
+            f"- provider_blocked_counts: {json.dumps(report.get('provider_blocked_counts', notes.get('provider_blocked_counts', {})), sort_keys=True)}",
+            f"- queries_attempted_by_provider: {json.dumps(report.get('queries_attempted_by_provider', notes.get('queries_attempted_by_provider', {})), sort_keys=True)}",
+            f"- rejected_content_domain_count: {report.get('rejected_content_domains_count', notes.get('rejected_content_domain_count', 0))}",
+            f"- cleaned_redirect_count: {report.get('cleaned_redirect_count', notes.get('cleaned_redirect_count', 0))}",
+            f"- rejected_redirect_count: {report.get('rejected_redirect_count', notes.get('rejected_redirect_count', 0))}",
+            f"- extraction_method_counts: {json.dumps(report.get('extraction_method_counts', notes.get('extraction_method_counts', {})), sort_keys=True)}",
+            f"- llm_provider_counts: {json.dumps(report.get('llm_provider_counts', notes.get('llm_provider_counts', {})), sort_keys=True)}",
+            f"- llm_model_counts: {json.dumps(report.get('llm_model_counts', notes.get('llm_model_counts', {})), sort_keys=True)}",
             "",
             "## Top 5 Leads",
             "",

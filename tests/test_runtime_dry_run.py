@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -152,6 +153,72 @@ class DryRunTests(unittest.TestCase):
             self.assertIn("Rejected Leads", tabs)
             mock_outreach.assert_called_once()
             self.assertFalse(any("draft_created" in str(call.args) for call in mock_append_outreach.call_args_list))
+            self.assertEqual(report["search_provider_counts"], {"duckduckgo": 1})
+            self.assertEqual(report["provider_blocked_counts"], {"duckduckgo": 0})
+            self.assertEqual(report["queries_attempted_by_provider"], {"duckduckgo": 1})
+            self.assertEqual(report["cleaned_redirect_count"], 0)
+            self.assertEqual(report["rejected_redirect_count"], 0)
+
+    @patch("amazon_lead_agent.runtime.append_daily_report")
+    @patch("amazon_lead_agent.runtime.append_outreach_log")
+    @patch("amazon_lead_agent.runtime.append_or_update_lead", side_effect=ValueError("Invalid values[1][16]"))
+    @patch("amazon_lead_agent.runtime.run_outreach", return_value=[])
+    @patch("amazon_lead_agent.runtime.run_scoring", return_value=[])
+    @patch("amazon_lead_agent.runtime.run_extraction", return_value=[])
+    @patch("amazon_lead_agent.runtime.run_discovery")
+    def test_sheet_write_error_does_not_crash_and_report_is_written(
+        self,
+        mock_discovery,
+        mock_extraction,
+        mock_scoring,
+        mock_outreach,
+        mock_append_lead,
+        mock_append_outreach,
+        mock_append_report,
+    ) -> None:
+        mock_discovery.return_value = {
+            "leads": [
+                {
+                    "id": "lead-1",
+                    "company_name": "Acme",
+                    "website": "https://example.com",
+                    "status": "discovered",
+                }
+            ],
+            "search_stats": {
+                "provider_counts": {"bing_html": 1},
+                "provider_blocked_counts": {"bing_html": 0},
+                "queries_attempted_by_provider": {"bing_html": 1},
+                "blocked_query_counts": {"bing_html": 0},
+                "rate_limited_query_counts": {"bing_html": 0},
+                "rejected_content_domain_count": 0,
+                "rejected_listicle_domains_count": 0,
+                "cleaned_redirect_count": 1,
+                "rejected_redirect_count": 0,
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "leads.db"
+            init_db(db_path)
+            old_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                report = run_campaign(
+                    {
+                        "storage": {"google_sheet_id": "sheet-123"},
+                        "campaign": {"minimum_score_for_draft": 75, "daily_draft_limit": 10, "daily_discovery_limit": 10},
+                        "sender": {"name": "Zaigham Ali", "offer": "Offer"},
+                    },
+                    db_path,
+                    mode="full",
+                    dry_run=True,
+                )
+            finally:
+                os.chdir(old_cwd)
+            self.assertEqual(report["sheet_mirror_error_count"], 1)
+            self.assertTrue(report["failed_sheet_rows"])
+            self.assertTrue(Path(tmpdir, "campaign_report.md").exists())
+            self.assertTrue(mock_append_report.called)
 
 
 if __name__ == "__main__":

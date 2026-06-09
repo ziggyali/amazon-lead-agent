@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from amazon_lead_agent.tools.search import discover_candidates, get_last_search_stats, search_web
+from amazon_lead_agent.tools.search import clean_search_result_url, discover_candidates, get_last_search_stats, search_web
 
 
 class SearchRouterTests(unittest.TestCase):
@@ -27,6 +27,13 @@ class SearchRouterTests(unittest.TestCase):
         self.assertEqual(stats["provider_counts"].get("duckduckgo"), 1)
         self.assertEqual(stats["provider_counts"].get("bing_html"), 1)
 
+    def test_bing_ck_a_url_is_decoded_or_rejected(self) -> None:
+        encoded_target = "a1aHR0cHM6Ly9icmFuZC5leGFtcGxlLmNvbS9wYWdl"
+        bing_url = f"https://www.bing.com/ck/a?!&&p=abc123&u={encoded_target}&c=1&amp;foo=bar"
+        cleaned = clean_search_result_url(bing_url)
+        self.assertEqual(cleaned, "https://brand.example.com/page")
+        self.assertEqual(clean_search_result_url("https://www.bing.com/ck/a?!&&p=abc123&u=badpayload&c=1"), "")
+
     def test_listicle_domains_are_rejected(self) -> None:
         article_result = {
             "title": "Best Amazon Brands to Watch",
@@ -43,7 +50,7 @@ class SearchRouterTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["url"], "https://brand.example.com/pages/where-to-buy")
         stats = get_last_search_stats()
-        self.assertEqual(stats["rejected_content_domains_count"], 1)
+        self.assertEqual(stats["rejected_content_domain_count"], 1)
         self.assertEqual(stats["rejected_listicle_domains_count"], 1)
 
 

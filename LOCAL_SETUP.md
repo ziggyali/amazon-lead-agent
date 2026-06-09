@@ -195,7 +195,7 @@ Arguments: -ExecutionPolicy Bypass -File C:\path\to\repo\scripts\run_local.ps1
 
 Hermes should be the preferred scheduler:
 
-1. Launch the local runner script.
+1. Launch the local runner script: `scripts/run_local.ps1` on Windows or `scripts/run_local.sh` on macOS/Linux.
 2. Wait for completion.
 3. Read `logs/latest.log`.
 4. Read `campaign_report.md`.

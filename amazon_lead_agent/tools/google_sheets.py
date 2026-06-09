@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from html import unescape
 import logging
 import json
 import os
 from pathlib import Path
+import re
 from typing import Any
 
 LOGGER = logging.getLogger(__name__)
 
 SPREADSHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
+MAX_CELL_LENGTH = 5000
+MAX_URL_CELL_LENGTH = 1000
+CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 def _auth_mode() -> str:
@@ -26,6 +31,44 @@ def _oauth_configured() -> bool:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _header_limit(header: str, value: Any) -> int:
+    header_lower = (header or "").lower()
+    if any(token in header_lower for token in ("url", "link", "website", "domain", "uri", "source_urls", "contact_page")):
+        return MAX_URL_CELL_LENGTH
+    if isinstance(value, (list, tuple, set, dict)):
+        return MAX_URL_CELL_LENGTH
+    return MAX_CELL_LENGTH
+
+
+def _compact_text(text: str, limit: int) -> str:
+    cleaned = CONTROL_CHAR_RE.sub("", unescape(str(text)))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if len(cleaned) > limit:
+        return cleaned[: limit - 3].rstrip() + "..."
+    return cleaned
+
+
+def _serialize_sheet_value(header: str, value: Any) -> Any:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    limit = _header_limit(header, value)
+    if isinstance(value, (list, tuple, set)):
+        serialized = json.dumps(list(value), ensure_ascii=False, separators=(",", ":"))
+        return _compact_text(serialized, limit)
+    if isinstance(value, dict):
+        serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        return _compact_text(serialized, limit)
+    return _compact_text(str(value), limit)
+
+
+def _sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {key: _serialize_sheet_value(key, value) for key, value in payload.items()}
 
 
 def _load_service_account_credentials():
@@ -148,6 +191,7 @@ def _ensure_headers(service, sheet_id: str, tab: str, headers: list[str]) -> Non
 
 
 def _upsert_row(service, sheet_id: str, tab: str, item: dict) -> None:
+    item = _sanitize_payload(item)
     key_name = "id" if "id" in item else "lead_id" if "lead_id" in item else None
     headers = list(item.keys())
     if key_name and key_name in headers:
@@ -183,8 +227,8 @@ def _upsert_row(service, sheet_id: str, tab: str, item: dict) -> None:
                 range=f"{tab}!A{index}",
                 valueInputOption="RAW",
                 body={"values": [[item.get(header, "") for header in header_row]]},
-            ).execute()
-            return
+        ).execute()
+        return
     values_api.append(
         spreadsheetId=sheet_id,
         range=tab,
@@ -201,6 +245,7 @@ def append_or_update_lead(sheet_id: str, tab: str, lead: dict) -> None:
 
 def append_outreach_log(sheet_id: str, event: dict) -> None:
     service = _build_service()
+    event = _sanitize_payload(event)
     payload = {
         "lead_id": event.get("lead_id", ""),
         "event_type": event.get("event_type", ""),
@@ -214,6 +259,7 @@ def append_outreach_log(sheet_id: str, event: dict) -> None:
 
 def append_daily_report(sheet_id: str, report: dict) -> None:
     service = _build_service()
+    report = _sanitize_payload(report)
     payload = {
         "report_date": report.get("report_date", _utc_now()[:10]),
         "campaign": report.get("campaign", "Amazon Lead Agent"),

@@ -5,7 +5,7 @@ The Python repo is the lead engine.
 
 Hermes should:
 
-- Run the local scripts in this repo.
+- Run the local wrapper script in this repo: `scripts/run_local.ps1` on Windows or `scripts/run_local.sh` on macOS/Linux.
 - Read `logs/latest.log` and `campaign_report.md`.
 - Schedule recurring runs locally.
 - Never modify code unless explicitly asked.
@@ -40,4 +40,3 @@ Use this for scheduled execution:
 - No LinkedIn scraping.
 - No anti-bot bypassing.
 - No secret handling beyond loading existing local env vars.
-

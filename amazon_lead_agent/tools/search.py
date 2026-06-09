@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from collections import defaultdict
 from copy import deepcopy
+from html import unescape
 from html.parser import HTMLParser
 import logging
 import os
+import base64
 import re
 import time
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse, urlunparse
@@ -45,6 +47,15 @@ QUERY_TEMPLATES = [
     'site:*.com "shop on Amazon" "{category}"',
 ]
 
+TRACKING_DOMAINS = {
+    "bing.com",
+    "www.bing.com",
+    "duckduckgo.com",
+    "www.duckduckgo.com",
+    "search.yahoo.com",
+    "www.search.yahoo.com",
+}
+
 _LAST_SEARCH_STATS: dict = {}
 
 
@@ -52,11 +63,15 @@ def _new_stats() -> dict:
     return {
         "search_provider_mode": os.environ.get("SEARCH_PROVIDER", "multi").strip().lower() or "multi",
         "queries_total": 0,
+        "queries_attempted_by_provider": defaultdict(int),
         "provider_counts": defaultdict(int),
+        "provider_blocked_counts": defaultdict(int),
         "blocked_query_counts": defaultdict(int),
         "rate_limited_query_counts": defaultdict(int),
-        "rejected_content_domains_count": 0,
+        "rejected_content_domain_count": 0,
         "rejected_listicle_domains_count": 0,
+        "cleaned_redirect_count": 0,
+        "rejected_redirect_count": 0,
     }
 
 
@@ -69,7 +84,9 @@ def get_last_search_stats() -> dict:
     if not _LAST_SEARCH_STATS:
         reset_search_stats()
     stats = deepcopy(_LAST_SEARCH_STATS)
+    stats["queries_attempted_by_provider"] = dict(stats["queries_attempted_by_provider"])
     stats["provider_counts"] = dict(stats["provider_counts"])
+    stats["provider_blocked_counts"] = dict(stats["provider_blocked_counts"])
     stats["blocked_query_counts"] = dict(stats["blocked_query_counts"])
     stats["rate_limited_query_counts"] = dict(stats["rate_limited_query_counts"])
     return stats
@@ -95,13 +112,79 @@ def _search_provider_order() -> list[str]:
 def clean_search_result_url(url: str) -> str:
     if not url:
         return ""
+    url = unescape(url).strip()
     parsed = urlparse(url)
     query = parse_qs(parsed.query)
-    if "uddg" in query and query["uddg"]:
-        return unquote(query["uddg"][0])
+    candidate_keys = ("uddg", "u", "url", "r", "target", "q", "dest", "destination", "href")
+    candidate_values: list[str] = []
+    for key in candidate_keys:
+        candidate_values.extend(query.get(key, []))
+    if parsed.fragment:
+        candidate_values.extend(parse_qs(parsed.fragment).get("u", []))
+    candidate_values.append(url)
+    for candidate in candidate_values:
+        resolved = _resolve_target_url(candidate)
+        if resolved:
+            return resolved
     if parsed.scheme in {"http", "https"}:
-        return urlunparse(parsed._replace(fragment=""))
+        final = urlunparse(parsed._replace(fragment=""))
+        if _is_tracking_or_search_domain(final):
+            return ""
+        return final
     return url
+
+
+def _is_tracking_or_search_domain(url: str) -> bool:
+    parsed = urlparse(url)
+    domain = normalize_domain(parsed.netloc or parsed.path)
+    if domain in TRACKING_DOMAINS:
+        return True
+    if parsed.netloc.endswith("bing.com") and parsed.path.startswith("/ck/a"):
+        return True
+    if parsed.netloc.endswith("bing.com") and "/ck/" in parsed.path:
+        return True
+    return False
+
+
+def _decode_base64ish(value: str) -> str:
+    cleaned = re.sub(r"^[a-zA-Z]\d+", "", value.strip())
+    cleaned = cleaned.replace("-", "+").replace("_", "/")
+    padding = "=" * (-len(cleaned) % 4)
+    try:
+        decoded = base64.b64decode(cleaned + padding, validate=False)
+        return decoded.decode("utf-8", errors="ignore")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _resolve_target_url(candidate: str) -> str:
+    if not candidate:
+        return ""
+    candidate = unescape(candidate).strip()
+    for _ in range(2):
+        candidate = unquote(candidate)
+    if candidate.startswith("http://") or candidate.startswith("https://"):
+        if _is_tracking_or_search_domain(candidate):
+            return ""
+        return candidate
+    if "http" in candidate:
+        match = re.search(r"https?://[^\s\"'<>]+", candidate)
+        if match:
+            resolved = match.group(0).rstrip(").,;")
+            if not _is_tracking_or_search_domain(resolved):
+                return resolved
+    decoded = _decode_base64ish(candidate)
+    if decoded and ("http://" in decoded or "https://" in decoded):
+        match = re.search(r"https?://[^\s\"'<>]+", decoded)
+        if match:
+            resolved = match.group(0).rstrip(").,;")
+            if not _is_tracking_or_search_domain(resolved):
+                return resolved
+    if "://" not in candidate and candidate.startswith("www."):
+        resolved = f"https://{candidate}"
+        if not _is_tracking_or_search_domain(resolved):
+            return resolved
+    return ""
 
 
 class _SearchParser(HTMLParser):
@@ -197,6 +280,7 @@ def _search_with_requests(provider: str, query: str, limit: int = 10) -> tuple[l
     headers = {"User-Agent": USER_AGENT}
     response = requests.get(url, headers=headers, timeout=20)
     if _blocked_response(response.status_code, response.text):
+        _stat_inc("provider_blocked_counts", provider)
         _stat_inc("blocked_query_counts", provider)
         if response.status_code in {429, 202}:
             _stat_inc("rate_limited_query_counts", provider)
@@ -228,6 +312,7 @@ def _search_with_playwright(provider: str, query: str, limit: int = 10) -> tuple
         return [], "blocked"
 
     if _blocked_response(200, html):
+        _stat_inc("provider_blocked_counts", provider)
         _stat_inc("blocked_query_counts", provider)
         LOGGER.info("provider_blocked provider=%s query=%s", provider, query)
         return [], "blocked"
@@ -240,6 +325,7 @@ def search_web(query: str, limit: int = 10, provider: str | None = None) -> list
     for current in providers:
         if not current:
             continue
+        _stat_inc("queries_attempted_by_provider", current)
         _stat_inc("provider_counts", current)
         try:
             if current == "playwright_search":
@@ -322,10 +408,18 @@ def discover_candidates(categories: list[str], limit: int = 50) -> list[dict]:
         sorted_results = sorted(provider_results, key=_result_score, reverse=True)
         for result in sorted_results:
             if _is_rejectable_content_result(result):
-                _LAST_SEARCH_STATS["rejected_content_domains_count"] += 1
+                _LAST_SEARCH_STATS["rejected_content_domain_count"] += 1
                 if any(keyword in (result.get("title") or "").lower() for keyword in CONTENT_TITLE_KEYWORDS):
                     _LAST_SEARCH_STATS["rejected_listicle_domains_count"] += 1
                 continue
+            raw_url = result.get("raw_url") or result.get("url") or ""
+            cleaned_url = clean_search_result_url(raw_url or result.get("url") or "")
+            if raw_url and cleaned_url and cleaned_url != raw_url:
+                _LAST_SEARCH_STATS["cleaned_redirect_count"] += 1
+            if raw_url and not cleaned_url:
+                _LAST_SEARCH_STATS["rejected_redirect_count"] += 1
+                continue
+            result["url"] = cleaned_url or result.get("url") or ""
             domain = normalize_domain(result.get("url"))
             if not domain or domain in seen_domains:
                 continue
