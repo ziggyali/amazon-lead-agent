@@ -46,6 +46,19 @@ class SheetStore:
     _pending_events: list[dict[str, Any]] = field(default_factory=list)
     _pending_reports: list[dict[str, Any]] = field(default_factory=list)
     flush_errors: list[dict[str, Any]] = field(default_factory=list)
+    _lead_queue_headers: list[str] = field(default_factory=list)
+    _lead_cache_loaded: bool = False
+    _lead_cache_available: bool = False
+    lead_queue_rows_queued: int = 0
+    lead_queue_rows_attempted: int = 0
+    lead_queue_rows_written: int = 0
+    lead_queue_rows_failed: int = 0
+    lead_queue_verified_count: int = 0
+    lead_queue_missing_after_write: int = 0
+    lead_queue_verification_status: str = "not_attempted"
+    dedupe_cache_unavailable: bool = False
+    storage_flush_status: str = "pending"
+    last_flush_summary: dict[str, Any] = field(default_factory=dict)
 
     def warm_tabs(self, tabs: list[str] | tuple[str, ...] | None = None) -> None:
         for tab in tabs or (*LEAD_TABS, *REPORT_TABS):
@@ -62,6 +75,40 @@ class SheetStore:
         for row in rows:
             self._index_row(tab, row)
         return [dict(row) for row in rows]
+
+    def _load_lead_queue_cache(self) -> None:
+        if self._lead_cache_loaded:
+            return
+        self._lead_cache_loaded = True
+        before_stats = google_sheets.get_io_stats()
+        try:
+            headers = google_sheets.read_tab_headers(self.sheet_id, "Lead Queue")
+        except Exception:  # noqa: BLE001
+            self.dedupe_cache_unavailable = True
+            self._lead_cache_available = False
+            return
+        after_header_stats = google_sheets.get_io_stats()
+        if not headers:
+            self.dedupe_cache_unavailable = True
+            self._lead_cache_available = False
+            return
+        self._lead_queue_headers = list(headers)
+        try:
+            rows = google_sheets.read_tab_rows(self.sheet_id, "Lead Queue")
+        except Exception:  # noqa: BLE001
+            self.dedupe_cache_unavailable = True
+            self._lead_cache_available = False
+            return
+        after_rows_stats = google_sheets.get_io_stats()
+        header_errors = len(after_header_stats.get("failed_sheet_reads", [])) - len(before_stats.get("failed_sheet_reads", []))
+        row_errors = len(after_rows_stats.get("failed_sheet_reads", [])) - len(after_header_stats.get("failed_sheet_reads", []))
+        if header_errors > 0 or row_errors > 0:
+            self.dedupe_cache_unavailable = True
+            self._lead_cache_available = False
+            return
+        self._lead_cache_available = True
+        for row in rows:
+            self._index_row("Lead Queue", row)
 
     def _index_row(self, tab: str, row: dict[str, Any]) -> None:
         lead_id = _lead_key(row)
@@ -99,6 +146,10 @@ class SheetStore:
 
     def _queue_report(self, report: dict[str, Any]) -> None:
         self._pending_reports.append(dict(report))
+
+    def _pending_rows_for_tab(self, tab: str) -> list[dict[str, Any]]:
+        pending = self._pending_leads.get(tab, {})
+        return [dict(row) for row in pending.values()]
 
     def get_all_leads(self) -> list[dict[str, Any]]:
         merged: dict[str, dict[str, Any]] = {}
@@ -207,8 +258,7 @@ class SheetStore:
         delay = 0.5
         for attempt in range(5):
             try:
-                writer()
-                return
+                return writer()
             except Exception as exc:  # noqa: BLE001
                 status = getattr(getattr(exc, "resp", None), "status", None) or getattr(exc, "status_code", None)
                 status_code = int(status) if status is not None else None
@@ -244,7 +294,93 @@ class SheetStore:
     def flush(self) -> None:
         if not self.sheet_id:
             return
+        previous_status = self.storage_flush_status
+        had_any_work = bool(self._pending_leads or self._pending_events or self._pending_reports)
+        previous_queued = self.lead_queue_rows_queued
+        previous_attempted = self.lead_queue_rows_attempted
+        previous_written = self.lead_queue_rows_written
+        previous_failed = self.lead_queue_rows_failed
+        previous_verified = self.lead_queue_verified_count
+        previous_missing = self.lead_queue_missing_after_write
+        previous_verification_status = self.lead_queue_verification_status
+        flush_failed = False
+        flush_attempted = False
+        flush_verified_status = "not_attempted"
+        flush_queued = 0
+        flush_attempted_count = 0
+        flush_written = 0
+        flush_failed_count = 0
+        flush_verified = 0
+        flush_missing = 0
+        lead_queue_rows = self._pending_rows_for_tab("Lead Queue")
+        flush_queued = len(lead_queue_rows)
+        if lead_queue_rows:
+            self._load_lead_queue_cache()
+            headers = self._lead_queue_headers or list(lead_queue_rows[0].keys())
+            if not self._lead_queue_headers:
+                self.dedupe_cache_unavailable = True
+            flush_attempted = True
+            flush_attempted_count = len(lead_queue_rows)
+            try:
+                result = self._write_with_backoff(
+                    lambda: google_sheets.append_rows(
+                        self.sheet_id,
+                        "Lead Queue",
+                        lead_queue_rows,
+                        headers,
+                        auth_mode=self.auth_mode,
+                        ensure_headers=False,
+                    ),
+                    label="Lead Queue:append_rows",
+                )
+                confirmed = int(result.get("confirmed_rows", len(lead_queue_rows))) if isinstance(result, dict) else len(lead_queue_rows)
+                flush_written = confirmed
+                if confirmed < len(lead_queue_rows):
+                    flush_failed_count = len(lead_queue_rows) - confirmed
+                    flush_failed = True
+                try:
+                    verification_rows = google_sheets.read_tab_rows(self.sheet_id, "Lead Queue", auth_mode=self.auth_mode)
+                    queued_ids = {_lead_key(row) for row in lead_queue_rows if _lead_key(row)}
+                    queued_domains = {_lead_domain(row) for row in lead_queue_rows if _lead_domain(row)}
+                    verified = 0
+                    for row in verification_rows:
+                        row_id = _lead_key(row)
+                        row_domain = _lead_domain(row)
+                        if row_id in queued_ids or row_domain in queued_domains:
+                            verified += 1
+                    flush_verified = verified
+                    flush_missing = max(0, confirmed - verified)
+                    flush_verified_status = "confirmed" if flush_missing == 0 else "failed"
+                    if flush_missing > 0:
+                        flush_failed = True
+                except Exception as exc:  # noqa: BLE001
+                    flush_verified_status = "skipped_due_to_read_error"
+                    context = {"tab": "Lead Queue", "kind": "verification", "error": str(exc), "lead_id": ""}
+                    LOGGER.warning("sheet verification skipped: %s", context)
+            except Exception as exc:  # noqa: BLE001
+                flush_failed_count = len(lead_queue_rows)
+                flush_failed = True
+                flush_verified_status = "failed"
+                context = {"tab": "Lead Queue", "kind": "lead", "operation": "append_rows", "error": str(exc), "lead_id": _lead_key(lead_queue_rows[0]) if lead_queue_rows else ""}
+                self.flush_errors.append(context)
+                LOGGER.warning("sheet flush failed: %s", context)
+        if flush_queued:
+            self.lead_queue_rows_queued += flush_queued
+        if flush_attempted:
+            self.lead_queue_rows_attempted += flush_attempted_count
+        if flush_written:
+            self.lead_queue_rows_written += flush_written
+        if flush_failed_count:
+            self.lead_queue_rows_failed += flush_failed_count
+        if flush_verified:
+            self.lead_queue_verified_count += flush_verified
+        if flush_missing:
+            self.lead_queue_missing_after_write += flush_missing
+        if flush_verified_status != "not_attempted":
+            self.lead_queue_verification_status = flush_verified_status
         for tab, rows in list(self._pending_leads.items()):
+            if tab == "Lead Queue":
+                continue
             for row in list(rows.values()):
                 try:
                     self._write_with_backoff(
@@ -252,7 +388,14 @@ class SheetStore:
                         label=f"{tab}:lead",
                     )
                 except Exception as exc:  # noqa: BLE001
-                    context = {"tab": tab, "kind": "lead", "error": str(exc), "lead_id": _lead_key(row)}
+                    context = {
+                        "tab": tab,
+                        "kind": "lead",
+                        "operation": "append_or_update_lead",
+                        "error": str(exc),
+                        "lead_id": _lead_key(row),
+                        "domain": _lead_domain(row),
+                    }
                     self.flush_errors.append(context)
                     LOGGER.warning("sheet flush failed: %s", context)
         for event in list(self._pending_events):
@@ -278,6 +421,29 @@ class SheetStore:
         self._pending_leads.clear()
         self._pending_events.clear()
         self._pending_reports.clear()
+        if flush_failed:
+            if flush_written and (flush_failed_count or flush_missing):
+                self.storage_flush_status = "partial_failed"
+            elif flush_attempted_count and (flush_failed_count or flush_missing):
+                self.storage_flush_status = "failed"
+            else:
+                self.storage_flush_status = "partial_failed"
+        elif self.flush_errors and previous_status == "pending":
+            self.storage_flush_status = "partial_failed"
+        elif previous_status == "pending" and had_any_work:
+            self.storage_flush_status = "ok"
+        self.last_flush_summary = {
+            "lead_queue_rows_queued": self.lead_queue_rows_queued,
+            "lead_queue_rows_attempted": self.lead_queue_rows_attempted,
+            "lead_queue_rows_written": self.lead_queue_rows_written,
+            "lead_queue_rows_failed": self.lead_queue_rows_failed,
+            "lead_queue_verified_count": self.lead_queue_verified_count,
+            "lead_queue_missing_after_write": self.lead_queue_missing_after_write,
+            "lead_queue_verification_status": self.lead_queue_verification_status,
+            "dedupe_cache_unavailable": self.dedupe_cache_unavailable,
+            "storage_flush_status": self.storage_flush_status,
+            "flush_errors": list(self.flush_errors),
+        }
 
     def commit(self) -> None:
         self.flush()
@@ -292,4 +458,14 @@ class SheetStore:
             "lead_count": len(self._lead_index),
             "dirty_tabs": sorted(self._dirty_tabs),
             "tabs": {tab: len(rows) for tab, rows in self._tab_cache.items()},
+            "lead_queue_rows_queued": self.lead_queue_rows_queued,
+            "lead_queue_rows_attempted": self.lead_queue_rows_attempted,
+            "lead_queue_rows_written": self.lead_queue_rows_written,
+            "lead_queue_rows_failed": self.lead_queue_rows_failed,
+            "lead_queue_verified_count": self.lead_queue_verified_count,
+            "lead_queue_missing_after_write": self.lead_queue_missing_after_write,
+            "lead_queue_verification_status": self.lead_queue_verification_status,
+            "dedupe_cache_unavailable": self.dedupe_cache_unavailable,
+            "storage_flush_status": self.storage_flush_status,
+            "last_flush_summary": dict(self.last_flush_summary),
         }

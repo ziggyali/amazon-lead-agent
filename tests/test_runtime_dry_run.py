@@ -101,9 +101,21 @@ class DryRunTests(unittest.TestCase):
                     self.reports.append(report)
 
                 def snapshot(self):
+                    queued = len(self.upserts)
                     return {
                         "sheet_mirror_error_count": self.sheet_mirror_error_count,
                         "failed_sheet_rows": self.failed_sheet_rows,
+                        "sheet_store": {
+                            "lead_queue_rows_queued": queued,
+                            "lead_queue_rows_attempted": queued,
+                            "lead_queue_rows_written": queued,
+                            "lead_queue_rows_failed": 0,
+                            "lead_queue_verified_count": queued,
+                            "lead_queue_missing_after_write": 0,
+                            "lead_queue_verification_status": "confirmed",
+                            "dedupe_cache_unavailable": False,
+                            "storage_flush_status": "ok",
+                        },
                         "uses_sheets": True,
                     }
 
@@ -281,6 +293,7 @@ class DryRunTests(unittest.TestCase):
                 return None
 
             def snapshot(self):
+                queued = len(self.rows_by_id)
                 return {
                     "sheet_mirror_error_count": self.sheet_mirror_error_count,
                     "failed_sheet_rows": list(self.failed_sheet_rows),
@@ -289,6 +302,17 @@ class DryRunTests(unittest.TestCase):
                     "sheet_read_retry_count": self.sheet_read_retry_count,
                     "sheet_connection_error_count": self.sheet_connection_error_count,
                     "failed_sheet_reads": list(self.failed_sheet_reads),
+                    "sheet_store": {
+                        "lead_queue_rows_queued": queued,
+                        "lead_queue_rows_attempted": queued,
+                        "lead_queue_rows_written": queued,
+                        "lead_queue_rows_failed": 0,
+                        "lead_queue_verified_count": queued,
+                        "lead_queue_missing_after_write": 0,
+                        "lead_queue_verification_status": "confirmed",
+                        "dedupe_cache_unavailable": False,
+                        "storage_flush_status": "ok",
+                    },
                     "uses_sheets": True,
                     "mode": "sheets",
                 }
@@ -320,27 +344,33 @@ class DryRunTests(unittest.TestCase):
                 "source_urls": ["https://www.tatcha.com"],
             },
         ]
-        mock_discovery.return_value = {
-            "leads": discovered,
-            "search_stats": {
-                "provider_counts": {"seeded": 2},
-                "blocked_query_counts": {},
-                "rate_limited_query_counts": {},
-                "rejected_content_domain_count": 0,
-                "rejected_listicle_domains_count": 0,
-                "cleaned_redirect_count": 0,
-                "rejected_redirect_count": 0,
-                "hard_rejected_junk_count": 0,
-                "soft_pass_needs_enrichment_count": 2,
-                "rejected_likely_brand_filter_count": 0,
-                "rejected_due_to_no_amazon_evidence_count": 0,
-                "discovered_count_by_category": {"beauty": 2},
-                "query_budget_used": 0,
-                "query_budget_remaining": 8,
-                "discovery_runtime_seconds": 0.01,
-                "stopped_reason": "accepted_limit_reached",
-            },
-        }
+
+        def discover_side_effect(config, storage):
+            for lead in discovered:
+                storage.upsert_lead(lead, tab="Lead Queue")
+            return {
+                "leads": discovered,
+                "search_stats": {
+                    "provider_counts": {"seeded": 2},
+                    "blocked_query_counts": {},
+                    "rate_limited_query_counts": {},
+                    "rejected_content_domain_count": 0,
+                    "rejected_listicle_domains_count": 0,
+                    "cleaned_redirect_count": 0,
+                    "rejected_redirect_count": 0,
+                    "hard_rejected_junk_count": 0,
+                    "soft_pass_needs_enrichment_count": 2,
+                    "rejected_likely_brand_filter_count": 0,
+                    "rejected_due_to_no_amazon_evidence_count": 0,
+                    "discovered_count_by_category": {"beauty": 2},
+                    "query_budget_used": 0,
+                    "query_budget_remaining": 8,
+                    "discovery_runtime_seconds": 0.01,
+                    "stopped_reason": "accepted_limit_reached",
+                },
+            }
+
+        mock_discovery.side_effect = discover_side_effect
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "leads.db"
@@ -420,6 +450,7 @@ class DryRunTests(unittest.TestCase):
                 return None
 
             def snapshot(self):
+                queued = len(self.rows_by_id)
                 return {
                     "sheet_mirror_error_count": self.sheet_mirror_error_count,
                     "failed_sheet_rows": list(self.failed_sheet_rows),
@@ -428,6 +459,17 @@ class DryRunTests(unittest.TestCase):
                     "sheet_read_retry_count": self.sheet_read_retry_count,
                     "sheet_connection_error_count": self.sheet_connection_error_count,
                     "failed_sheet_reads": list(self.failed_sheet_reads),
+                    "sheet_store": {
+                        "lead_queue_rows_queued": queued,
+                        "lead_queue_rows_attempted": queued,
+                        "lead_queue_rows_written": queued,
+                        "lead_queue_rows_failed": 0,
+                        "lead_queue_verified_count": queued,
+                        "lead_queue_missing_after_write": 0,
+                        "lead_queue_verification_status": "confirmed",
+                        "dedupe_cache_unavailable": False,
+                        "storage_flush_status": "ok",
+                    },
                     "uses_sheets": True,
                     "mode": "sheets",
                 }
@@ -441,44 +483,40 @@ class DryRunTests(unittest.TestCase):
 
         fake_storage = FakeStorage()
         mock_get_storage_router.return_value = fake_storage
-        mock_discovery.return_value = {
-            "leads": [
-                {
-                    "id": "lead-dup",
-                    "company_name": "Glossier",
-                    "website": "https://www.glossier.com",
-                    "category": "beauty",
-                    "status": "needs_enrichment",
-                    "source_urls": ["https://www.glossier.com"],
+        def duplicate_discover_side_effect(config, storage):
+            lead = {
+                "id": "lead-dup",
+                "company_name": "Glossier",
+                "website": "https://www.glossier.com",
+                "category": "beauty",
+                "status": "needs_enrichment",
+                "source_urls": ["https://www.glossier.com"],
+            }
+            storage.upsert_lead(lead, tab="Lead Queue")
+            storage.upsert_lead(lead, tab="Lead Queue")
+            return {
+                "leads": [lead, lead],
+                "search_stats": {
+                    "provider_counts": {"seeded": 2},
+                    "blocked_query_counts": {},
+                    "rate_limited_query_counts": {},
+                    "rejected_content_domain_count": 0,
+                    "rejected_listicle_domains_count": 0,
+                    "cleaned_redirect_count": 0,
+                    "rejected_redirect_count": 0,
+                    "hard_rejected_junk_count": 0,
+                    "soft_pass_needs_enrichment_count": 2,
+                    "rejected_likely_brand_filter_count": 0,
+                    "rejected_due_to_no_amazon_evidence_count": 0,
+                    "discovered_count_by_category": {"beauty": 2},
+                    "query_budget_used": 0,
+                    "query_budget_remaining": 8,
+                    "discovery_runtime_seconds": 0.01,
+                    "stopped_reason": "accepted_limit_reached",
                 },
-                {
-                    "id": "lead-dup",
-                    "company_name": "Glossier",
-                    "website": "https://www.glossier.com",
-                    "category": "beauty",
-                    "status": "needs_enrichment",
-                    "source_urls": ["https://www.glossier.com"],
-                },
-            ],
-            "search_stats": {
-                "provider_counts": {"seeded": 2},
-                "blocked_query_counts": {},
-                "rate_limited_query_counts": {},
-                "rejected_content_domain_count": 0,
-                "rejected_listicle_domains_count": 0,
-                "cleaned_redirect_count": 0,
-                "rejected_redirect_count": 0,
-                "hard_rejected_junk_count": 0,
-                "soft_pass_needs_enrichment_count": 2,
-                "rejected_likely_brand_filter_count": 0,
-                "rejected_due_to_no_amazon_evidence_count": 0,
-                "discovered_count_by_category": {"beauty": 2},
-                "query_budget_used": 0,
-                "query_budget_remaining": 8,
-                "discovery_runtime_seconds": 0.01,
-                "stopped_reason": "accepted_limit_reached",
-            },
-        }
+            }
+
+        mock_discovery.side_effect = duplicate_discover_side_effect
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "leads.db"
@@ -496,7 +534,7 @@ class DryRunTests(unittest.TestCase):
 
         self.assertEqual(len(fake_storage.rows_by_id), 1)
         self.assertEqual(len(fake_storage.upsert_calls), 2)
-        self.assertEqual(report["discovered_persisted_count"], 2)
+        self.assertEqual(report["discovered_persisted_count"], 1)
         self.assertEqual(report["discovered_persist_failed_count"], 0)
 
     @patch("amazon_lead_agent.runtime.get_storage_router")
@@ -553,6 +591,17 @@ class DryRunTests(unittest.TestCase):
                     "sheet_read_retry_count": self.sheet_read_retry_count,
                     "sheet_connection_error_count": self.sheet_connection_error_count,
                     "failed_sheet_reads": list(self.failed_sheet_reads),
+                    "sheet_store": {
+                        "lead_queue_rows_queued": 1,
+                        "lead_queue_rows_attempted": 1,
+                        "lead_queue_rows_written": 0,
+                        "lead_queue_rows_failed": 1,
+                        "lead_queue_verified_count": 0,
+                        "lead_queue_missing_after_write": 0,
+                        "lead_queue_verification_status": "failed",
+                        "dedupe_cache_unavailable": False,
+                        "storage_flush_status": "failed",
+                    },
                     "uses_sheets": True,
                     "mode": "sheets",
                 }
@@ -611,7 +660,7 @@ class DryRunTests(unittest.TestCase):
             )
 
         self.assertGreater(report["discovered_persist_failed_count"], 0)
-        self.assertGreaterEqual(report["lead_queue_rows_written"], 1)
+        self.assertEqual(report["lead_queue_rows_written"], 0)
         self.assertEqual(report["drafts_created"], 0)
 
     @patch("amazon_lead_agent.runtime.get_storage_router")

@@ -249,6 +249,30 @@ def read_tab_rows(sheet_id: str, tab: str, auth_mode: str | None = None) -> list
             return []
 
 
+def read_tab_headers(sheet_id: str, tab: str, auth_mode: str | None = None) -> list[str]:
+    delay = 0.5
+    for attempt in range(5):
+        try:
+            service = _build_service(auth_mode=auth_mode)
+            values = service.spreadsheets().values().get(spreadsheetId=sheet_id, range=f"{tab}!1:1").execute().get("values", [])
+            if not values:
+                return []
+            return [str(header) for header in values[0]]
+        except Exception as exc:  # noqa: BLE001
+            if _is_auth_error(exc):
+                raise RuntimeError(f"Google Sheets auth failed while reading headers for {tab}: {exc}") from exc
+            if _is_retryable_read_error(exc) and attempt < 4:
+                _LAST_IO_STATS["sheet_read_retry_count"] += 1
+                _record_read_failure(sheet_id, tab, exc)
+                LOGGER.info("sheet header read retry sheet_id=%s tab=%s attempt=%s error=%s", sheet_id, tab, attempt + 1, exc)
+                time.sleep(delay + (delay * 0.2))
+                delay *= 2
+                continue
+            _record_read_failure(sheet_id, tab, exc)
+            LOGGER.warning("sheet header read failed sheet_id=%s tab=%s error=%s", sheet_id, tab, exc)
+            return []
+
+
 def _ensure_tab_exists(service, sheet_id: str, tab: str) -> None:
     spreadsheet = service.spreadsheets().get(spreadsheetId=sheet_id).execute()
     for existing in spreadsheet.get("sheets", []):
@@ -330,6 +354,39 @@ def _upsert_row(service, sheet_id: str, tab: str, item: dict) -> None:
         insertDataOption="INSERT_ROWS",
         body={"values": [[item.get(header, "") for header in header_row]]},
     ).execute()
+
+
+def append_rows(
+    sheet_id: str,
+    tab: str,
+    rows: list[dict[str, Any]],
+    headers: list[str],
+    auth_mode: str | None = None,
+    ensure_headers: bool = False,
+) -> dict[str, Any]:
+    service = _build_service(auth_mode=auth_mode)
+    tab_headers = [str(header) for header in headers if str(header).strip()]
+    if not tab_headers:
+        raise RuntimeError(f"Cannot append rows to {tab}: no headers provided")
+    sanitized_rows = [_sanitize_payload(row) for row in rows]
+    if ensure_headers:
+        _ensure_headers(service, sheet_id, tab, tab_headers)
+    values_api = service.spreadsheets().values()
+    body_rows = [[row.get(header, "") for header in tab_headers] for row in sanitized_rows]
+    response = values_api.append(
+        spreadsheetId=sheet_id,
+        range=tab,
+        valueInputOption="RAW",
+        insertDataOption="INSERT_ROWS",
+        body={"values": body_rows},
+    ).execute()
+    updates = response.get("updates", {}) if isinstance(response, dict) else {}
+    confirmed_rows = updates.get("updatedRows") or response.get("updatedRows") or len(body_rows)
+    try:
+        confirmed_rows = int(confirmed_rows)
+    except Exception:  # noqa: BLE001
+        confirmed_rows = len(body_rows)
+    return {"confirmed_rows": confirmed_rows, "response": response, "headers": tab_headers}
 
 
 def append_or_update_lead(sheet_id: str, tab: str, lead: dict) -> None:

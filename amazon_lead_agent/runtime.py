@@ -79,7 +79,14 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
         "rejected_redirect_count": 0,
         "discovered_persisted_count": 0,
         "discovered_persist_failed_count": 0,
+        "lead_queue_rows_queued": 0,
+        "lead_queue_rows_attempted": 0,
         "lead_queue_rows_written": 0,
+        "lead_queue_rows_failed": 0,
+        "lead_queue_verified_count": 0,
+        "lead_queue_missing_after_write": 0,
+        "lead_queue_verification_status": "not_attempted",
+        "dedupe_cache_unavailable": False,
         "storage_flush_status": "pending",
         "storage_mode_used": _storage_mode_label(storage),
         "llm_provider_counts": {},
@@ -129,25 +136,6 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
             report["discovered_count_by_category"] = search_stats.get("discovered_count_by_category", {})
             report["cleaned_redirect_count"] = int(search_stats.get("cleaned_redirect_count", 0))
             report["rejected_redirect_count"] = int(search_stats.get("rejected_redirect_count", 0))
-
-            pre_failed_rows = len(getattr(storage, "failed_sheet_rows", []))
-            persist_failed = 0
-            for lead in discovered:
-                try:
-                    storage.upsert_lead(lead, tab="Lead Queue")
-                except Exception as exc:  # noqa: BLE001
-                    persist_failed += 1
-                    LOGGER.warning(
-                        "failed to persist discovered lead id=%s website=%s: %s",
-                        lead.get("id", ""),
-                        lead.get("website", ""),
-                        exc,
-                    )
-            row_failures_delta = max(0, len(getattr(storage, "failed_sheet_rows", [])) - pre_failed_rows)
-            report["lead_queue_rows_written"] += len(discovered)
-            report["discovered_persist_failed_count"] += max(persist_failed, row_failures_delta)
-            report["discovered_persisted_count"] += max(0, len(discovered) - max(persist_failed, row_failures_delta))
-            report["storage_flush_status"] = _safe_commit(storage, report, label="discovery")
 
         if mode in {"full", "enrich"}:
             enriched = run_extraction(config, storage)
@@ -202,6 +190,36 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
         report["errors"] += 1
         LOGGER.exception("campaign run failed: %s", exc)
     finally:
+        pre_report_flush_status = report["storage_flush_status"]
+        if report["storage_flush_status"] == "pending":
+            report["storage_flush_status"] = _safe_commit(storage, report, label="pre_report")
+        snapshot = storage.snapshot()
+        sheet_store_snapshot = snapshot.get("sheet_store", {})
+        if not isinstance(sheet_store_snapshot, dict):
+            sheet_store_snapshot = {}
+        report["sheet_mirror_error_count"] = int(snapshot.get("sheet_mirror_error_count", report["sheet_mirror_error_count"]))
+        report["failed_sheet_rows"] = snapshot.get("failed_sheet_rows", report["failed_sheet_rows"])
+        report["sheet_read_error_count"] = int(snapshot.get("sheet_read_error_count", report["sheet_read_error_count"]))
+        report["sheet_read_retry_count"] = int(snapshot.get("sheet_read_retry_count", report["sheet_read_retry_count"]))
+        report["sheet_connection_error_count"] = int(snapshot.get("sheet_connection_error_count", report["sheet_connection_error_count"]))
+        report["failed_sheet_reads"] = snapshot.get("failed_sheet_reads", report["failed_sheet_reads"])
+        report["sheet_flush_errors"] = snapshot.get("sheet_flush_errors", report["sheet_flush_errors"])
+        report["sheet_mirror_status"] = "enabled" if snapshot.get("uses_sheets") else "disabled"
+        report["lead_queue_rows_queued"] = int(sheet_store_snapshot.get("lead_queue_rows_queued", report["lead_queue_rows_queued"]))
+        report["lead_queue_rows_attempted"] = int(sheet_store_snapshot.get("lead_queue_rows_attempted", report["lead_queue_rows_attempted"]))
+        report["lead_queue_rows_written"] = int(sheet_store_snapshot.get("lead_queue_rows_written", report["lead_queue_rows_written"]))
+        report["lead_queue_rows_failed"] = int(sheet_store_snapshot.get("lead_queue_rows_failed", report["lead_queue_rows_failed"]))
+        report["lead_queue_verified_count"] = int(sheet_store_snapshot.get("lead_queue_verified_count", report["lead_queue_verified_count"]))
+        report["lead_queue_missing_after_write"] = int(sheet_store_snapshot.get("lead_queue_missing_after_write", report["lead_queue_missing_after_write"]))
+        report["lead_queue_verification_status"] = str(sheet_store_snapshot.get("lead_queue_verification_status", report["lead_queue_verification_status"]))
+        report["dedupe_cache_unavailable"] = bool(sheet_store_snapshot.get("dedupe_cache_unavailable", report["dedupe_cache_unavailable"]))
+        report["discovered_persisted_count"] = report["lead_queue_rows_written"]
+        report["discovered_persist_failed_count"] = report["lead_queue_rows_failed"]
+        sheet_flush_status = str(sheet_store_snapshot.get("storage_flush_status", "") or "").strip()
+        if sheet_flush_status:
+            report["storage_flush_status"] = sheet_flush_status
+        elif report["storage_flush_status"] == "pending":
+            report["storage_flush_status"] = pre_report_flush_status
         report["llm_provider_counts"] = report.get("llm_provider_counts", {})
         report["llm_model_counts"] = report.get("llm_model_counts", {})
         report["notes_json"] = json.dumps(
@@ -216,6 +234,14 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
                 "failed_sheet_rows": report["failed_sheet_rows"],
                 "failed_sheet_reads": report["failed_sheet_reads"],
                 "sheet_flush_errors": report["sheet_flush_errors"],
+                "lead_queue_rows_queued": report["lead_queue_rows_queued"],
+                "lead_queue_rows_attempted": report["lead_queue_rows_attempted"],
+                "lead_queue_rows_written": report["lead_queue_rows_written"],
+                "lead_queue_rows_failed": report["lead_queue_rows_failed"],
+                "lead_queue_verified_count": report["lead_queue_verified_count"],
+                "lead_queue_missing_after_write": report["lead_queue_missing_after_write"],
+                "lead_queue_verification_status": report["lead_queue_verification_status"],
+                "dedupe_cache_unavailable": report["dedupe_cache_unavailable"],
                 "search_provider_counts": report["search_provider_counts"],
                 "provider_blocked_counts": report["provider_blocked_counts"],
                 "queries_attempted_by_provider": report["queries_attempted_by_provider"],
@@ -240,7 +266,14 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
                 "rejected_redirect_count": report["rejected_redirect_count"],
                 "discovered_persisted_count": report["discovered_persisted_count"],
                 "discovered_persist_failed_count": report["discovered_persist_failed_count"],
+                "lead_queue_rows_queued": report["lead_queue_rows_queued"],
+                "lead_queue_rows_attempted": report["lead_queue_rows_attempted"],
                 "lead_queue_rows_written": report["lead_queue_rows_written"],
+                "lead_queue_rows_failed": report["lead_queue_rows_failed"],
+                "lead_queue_verified_count": report["lead_queue_verified_count"],
+                "lead_queue_missing_after_write": report["lead_queue_missing_after_write"],
+                "lead_queue_verification_status": report["lead_queue_verification_status"],
+                "dedupe_cache_unavailable": report["dedupe_cache_unavailable"],
                 "storage_flush_status": report["storage_flush_status"],
                 "storage_mode_used": report["storage_mode_used"],
                 "extraction_method_counts": report["extraction_method_counts"],
@@ -302,7 +335,14 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
                     "rejected_redirect_count": report["rejected_redirect_count"],
                     "discovered_persisted_count": report["discovered_persisted_count"],
                     "discovered_persist_failed_count": report["discovered_persist_failed_count"],
+                    "lead_queue_rows_queued": report["lead_queue_rows_queued"],
+                    "lead_queue_rows_attempted": report["lead_queue_rows_attempted"],
                     "lead_queue_rows_written": report["lead_queue_rows_written"],
+                    "lead_queue_rows_failed": report["lead_queue_rows_failed"],
+                    "lead_queue_verified_count": report["lead_queue_verified_count"],
+                    "lead_queue_missing_after_write": report["lead_queue_missing_after_write"],
+                    "lead_queue_verification_status": report["lead_queue_verification_status"],
+                    "dedupe_cache_unavailable": report["dedupe_cache_unavailable"],
                     "storage_flush_status": report["storage_flush_status"],
                     "storage_mode_used": report["storage_mode_used"],
                     "extraction_method_counts": report["extraction_method_counts"],
@@ -314,19 +354,7 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("daily report mirror failed: %s", exc)
             report["sheet_mirror_error_count"] = int(report.get("sheet_mirror_error_count", 0)) + 1
-        snapshot = storage.snapshot()
-        report["sheet_mirror_error_count"] = int(snapshot.get("sheet_mirror_error_count", report["sheet_mirror_error_count"]))
-        report["failed_sheet_rows"] = snapshot.get("failed_sheet_rows", report["failed_sheet_rows"])
-        report["sheet_read_error_count"] = int(snapshot.get("sheet_read_error_count", report["sheet_read_error_count"]))
-        report["sheet_read_retry_count"] = int(snapshot.get("sheet_read_retry_count", report["sheet_read_retry_count"]))
-        report["sheet_connection_error_count"] = int(snapshot.get("sheet_connection_error_count", report["sheet_connection_error_count"]))
-        report["failed_sheet_reads"] = snapshot.get("failed_sheet_reads", report["failed_sheet_reads"])
-        report["sheet_flush_errors"] = snapshot.get("sheet_flush_errors", report["sheet_flush_errors"])
-        report["sheet_mirror_status"] = "enabled" if snapshot.get("uses_sheets") else "disabled"
-        if report["storage_flush_status"] == "pending":
-            report["storage_flush_status"] = _safe_commit(storage, report, label="final")
-        else:
-            _safe_commit(storage, report, label="final")
+        _safe_commit(storage, report, label="final")
         storage.close()
     if fatal_error:
         raise fatal_error
