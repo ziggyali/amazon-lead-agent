@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from amazon_lead_agent.tools.amazon_backlink_discovery import has_verified_amazon_evidence
 from amazon_lead_agent.lead_filters import is_blocked_domain, is_junk_company_name, is_likely_brand_domain
 from amazon_lead_agent.tools.storage_router import StorageRouter, get_storage_router
 
@@ -16,21 +17,7 @@ def _truthy(value: object) -> bool:
 
 
 def _verified_amazon_evidence(lead: dict) -> bool:
-    amazon_backlink = _truthy(lead.get("amazon_backlink_found"))
-    amazon_links = lead.get("amazon_links") or lead.get("amazon_links_json") or []
-    amazon_evidence_url = lead.get("amazon_evidence_url") or lead.get("amazon_evidence_urls") or []
-    if isinstance(amazon_evidence_url, str):
-        amazon_evidence_url = [amazon_evidence_url]
-    evidence_text = " ".join(
-        str(part or "")
-        for part in [lead.get("amazon_evidence_summary"), lead.get("description"), lead.get("notes")]
-    ).lower()
-    return bool(
-        amazon_backlink
-        or amazon_links
-        or amazon_evidence_url
-        or any(signal in evidence_text for signal in ("available on amazon", "shop our amazon store", "buy on amazon", "amazon storefront", "amazon store"))
-    )
+    return has_verified_amazon_evidence(lead)
 
 
 def score_lead(lead: dict) -> dict:
@@ -40,7 +27,7 @@ def score_lead(lead: dict) -> dict:
 
     amazon_backlink = _truthy(lead.get("amazon_backlink_found"))
     amazon_links = lead.get("amazon_links") or lead.get("amazon_links_json") or []
-    if amazon_backlink or amazon_links:
+    if _verified_amazon_evidence(lead) or amazon_backlink or amazon_links:
         score += 30
         reasons.append("Amazon evidence found")
 

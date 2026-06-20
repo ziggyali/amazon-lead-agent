@@ -4,7 +4,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from amazon_lead_agent.lead_filters import is_junk_company_name, is_blocked_domain, is_tracking_or_search_domain, is_likely_brand_domain, is_soft_brand_candidate
-from amazon_lead_agent.normalization import make_lead_id, normalize_company_name
+from amazon_lead_agent.normalization import ensure_lead_identity, infer_brand_name_from_domain, make_lead_id, normalize_company_name
 from amazon_lead_agent.tools.amazon_backlink_discovery import contains_amazon_buying_signal
 from amazon_lead_agent.tools.search import discover_candidates, get_last_search_stats
 from amazon_lead_agent.tools.storage_router import StorageRouter, get_storage_router
@@ -13,24 +13,27 @@ from amazon_lead_agent.tools.storage_router import StorageRouter, get_storage_ro
 def _candidate_from_result(result: dict[str, str], category: str) -> dict[str, object]:
     title = result.get("title") or ""
     website = result.get("url") or ""
-    company = title.split("|")[0].strip() or website
+    company = title.split("|")[0].strip() or result.get("label") or infer_brand_name_from_domain(website) or website
     source_url = result.get("source_url") or website
     snippet = result.get("snippet") or ""
     status_hint = str(result.get("status_hint") or "").strip().lower()
-    return {
+    lead = {
         "id": make_lead_id(company, website, source_url),
+        "lead_id": make_lead_id(company, website, source_url),
         "company_name": company,
         "brand_name": company,
         "normalized_company_name": normalize_company_name(company),
         "website": website,
         "category": category,
+        "seed_label": result.get("label") or "",
         "primary_source_url": source_url,
         "source_urls": [source_url] if source_url else [],
         "amazon_evidence_summary": snippet if contains_amazon_buying_signal(snippet) else "",
-        "amazon_backlink_found": int(contains_amazon_buying_signal(snippet)),
+        "amazon_backlink_found": 0,
         "status": status_hint if status_hint in {"needs_enrichment", "discovered"} else "discovered",
         "status_hint": status_hint,
     }
+    return ensure_lead_identity(lead)
 
 
 def _hard_reject_candidate(lead: dict[str, object]) -> bool:

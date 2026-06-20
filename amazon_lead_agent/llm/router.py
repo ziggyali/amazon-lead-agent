@@ -49,6 +49,7 @@ class LLMRouter:
         self.gemini_api_key = gemini_api_key or _optional_env("GEMINI_API_KEY")
         self.last_used_provider: str | None = None
         self.last_used_model: str | None = None
+        self.last_attempted_providers: list[dict[str, str]] = []
         self._client_cache: dict[str, LLMClient | None] = {}
 
     def _ordered_providers(self) -> list[str]:
@@ -107,26 +108,50 @@ class LLMRouter:
         self._client_cache[provider] = client
         return client
 
-    def _select_client(self) -> LLMClient:
-        attempted: list[str] = []
+    def _client_model_name(self, client: LLMClient) -> str:
+        return str(
+            client.last_used_model
+            or getattr(client, "model", None)
+            or getattr(client, "model_name", None)
+            or "",
+        )
+
+    def _call_with_fallback(self, method_name: str, prompt: str, purpose: str) -> Any:
+        attempted: list[dict[str, str]] = []
+        errors: list[str] = []
+        self.last_attempted_providers = []
         for provider in self._ordered_providers():
-            attempted.append(provider)
             client = self._client_for(provider)
+            attempt = {"provider": provider, "model": ""}
             if client is None:
+                attempt["error"] = "unavailable"
+                attempted.append(attempt)
+                self.last_attempted_providers = list(attempted)
                 continue
-            return client
-        raise RuntimeError(f"No usable LLM provider found. Attempted: {', '.join(attempted) or 'none'}")
+            attempt["model"] = self._client_model_name(client)
+            attempted.append(attempt)
+            self.last_attempted_providers = list(attempted)
+            try:
+                result = getattr(client, method_name)(prompt, purpose=purpose)
+            except Exception as exc:  # noqa: BLE001
+                attempt["error"] = str(exc)
+                errors.append(f"{provider}: {exc}")
+                LOGGER.info("llm provider failed provider=%s purpose=%s error=%s", provider, purpose, exc)
+                continue
+            self.last_used_provider = client.last_used_provider or getattr(client, "provider_name", None) or provider
+            self.last_used_model = client.last_used_model or self._client_model_name(client)
+            return result
+        attempted_label = ", ".join(
+            f"{item.get('provider')}{'/' + item['model'] if item.get('model') else ''}" for item in attempted
+        ) or "none"
+        raise RuntimeError(f"No usable LLM provider found. Attempted: {attempted_label}. Errors: {'; '.join(errors) or 'none'}")
 
     def generate_text(self, prompt: str, purpose: str = "general") -> str:
-        client = self._select_client()
-        result = client.generate_text(prompt, purpose=purpose)
-        self.last_used_provider = client.last_used_provider or getattr(client, "provider_name", None)
-        self.last_used_model = client.last_used_model or getattr(client, "model", None) or getattr(client, "model_name", None)
-        return result
+        result = self._call_with_fallback("generate_text", prompt, purpose)
+        return str(result).strip()
 
     def generate_json(self, prompt: str, purpose: str = "extraction") -> dict[str, Any]:
-        client = self._select_client()
-        result = client.generate_json(prompt, purpose=purpose)
-        self.last_used_provider = client.last_used_provider or getattr(client, "provider_name", None)
-        self.last_used_model = client.last_used_model or getattr(client, "model", None) or getattr(client, "model_name", None)
-        return result
+        result = self._call_with_fallback("generate_json", prompt, purpose)
+        if isinstance(result, dict):
+            return result
+        raise RuntimeError("LLM provider returned a non-dict JSON payload")

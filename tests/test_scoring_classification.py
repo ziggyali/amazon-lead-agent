@@ -61,6 +61,69 @@ class ScoringClassificationTests(unittest.TestCase):
         self.assertEqual(outcome["status"], "needs_enrichment")
         self.assertEqual(outcome["send_status"], "not_eligible")
 
+    def test_text_only_amazon_mention_does_not_approve(self) -> None:
+        lead = {
+            "score": 95,
+            "tier": "A",
+            "company_name": "Brand Example",
+            "website": "https://brand.example.com",
+            "category": "beauty",
+            "amazon_evidence_summary": "available on Amazon",
+            "public_emails": ["hello@brand.example.com"],
+            "contact_page_url": "https://brand.example.com/contact",
+            "extraction_method": "minimax_direct_m3",
+        }
+        outcome = classify_scored_lead(lead, 75, allowed_categories={"beauty"})
+        self.assertEqual(outcome["status"], "needs_enrichment")
+        self.assertEqual(outcome["send_status"], "not_eligible")
+
+    def test_valid_amazon_url_can_approve(self) -> None:
+        lead = {
+            "score": 95,
+            "tier": "A",
+            "company_name": "Brand Example",
+            "website": "https://brand.example.com",
+            "category": "beauty",
+            "amazon_backlink_found": True,
+            "amazon_links": ["https://www.amazon.com/stores/brand"],
+            "public_emails": ["hello@brand.example.com"],
+            "contact_page_url": "https://brand.example.com/contact",
+            "extraction_method": "minimax_direct_m3",
+        }
+        outcome = classify_scored_lead(lead, 75, allowed_categories={"beauty"})
+        self.assertEqual(outcome["status"], "approved")
+
+    def test_official_brand_page_linking_to_amazon_counts(self) -> None:
+        lead = {
+            "score": 85,
+            "tier": "B",
+            "company_name": "Brand Example",
+            "website": "https://brand.example.com",
+            "category": "beauty",
+            "amazon_backlink_found": True,
+            "amazon_links": ["https://www.amazon.com/stores/brand"],
+            "public_emails": [],
+            "contact_page_url": "https://brand.example.com/contact",
+            "extraction_method": "minimax_direct_m3",
+        }
+        outcome = classify_scored_lead(lead, 75, allowed_categories={"beauty"})
+        self.assertEqual(outcome["status"], "contact_form_queue")
+
+    def test_hallucinated_amazon_summary_does_not_count(self) -> None:
+        lead = {
+            "score": 95,
+            "tier": "A",
+            "company_name": "Brand Example",
+            "website": "https://brand.example.com",
+            "category": "beauty",
+            "amazon_evidence_summary": "LLM summary says brand is available on Amazon",
+            "public_emails": ["hello@brand.example.com"],
+            "contact_page_url": "https://brand.example.com/contact",
+            "extraction_method": "minimax_direct_m3",
+        }
+        outcome = classify_scored_lead(lead, 75, allowed_categories={"beauty"})
+        self.assertEqual(outcome["status"], "needs_enrichment")
+
     def test_contact_form_queue_requires_verified_amazon_evidence(self) -> None:
         lead = {
             "score": 80,

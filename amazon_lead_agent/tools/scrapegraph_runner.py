@@ -10,6 +10,8 @@ from amazon_lead_agent.prompts import load_prompt
 from amazon_lead_agent.tools.amazon_backlink_discovery import (
     contains_amazon_buying_signal,
     extract_amazon_links,
+    has_verified_amazon_evidence,
+    is_valid_amazon_url,
     summarize_amazon_evidence,
 )
 from amazon_lead_agent.tools.web_extraction import (
@@ -111,7 +113,7 @@ def _heuristic_profile(url: str, snapshot: dict) -> dict:
         "description": text[:800],
         "amazon_links": snapshot["amazon_links"],
         "amazon_evidence_summary": amazon_evidence_summary,
-        "amazon_backlink_found": bool(snapshot["amazon_links"] or contains_amazon_buying_signal(text)),
+        "amazon_backlink_found": bool(snapshot["amazon_links"]),
         "founder_or_executive_names": [],
         "ecommerce_or_marketplace_people": [],
         "public_emails": snapshot["public_emails"],
@@ -148,9 +150,14 @@ def _normalize_profile(profile: dict, url: str, snapshot: dict, extraction_metho
     profile["website"] = profile.get("website") or snapshot["url"] or url
     profile["company_name"] = profile.get("company_name") or profile.get("brand_name") or snapshot.get("title") or snapshot["url"]
     profile["brand_name"] = profile.get("brand_name") or profile["company_name"]
-    profile["amazon_links"] = sorted(set(_ensure_list(profile.get("amazon_links")) + list(snapshot["amazon_links"])))
+    amazon_links = [link for link in _ensure_list(profile.get("amazon_links")) + list(snapshot["amazon_links"]) if is_valid_amazon_url(link)]
+    amazon_evidence_urls = [url for url in _ensure_list(profile.get("amazon_evidence_url")) + _ensure_list(profile.get("amazon_evidence_urls")) if is_valid_amazon_url(url)]
+    profile["amazon_links"] = sorted(set(amazon_links))
+    profile["amazon_evidence_urls"] = sorted(set(amazon_evidence_urls or amazon_links))
+    if profile["amazon_evidence_urls"]:
+        profile["amazon_evidence_url"] = profile["amazon_evidence_urls"][0]
     profile["amazon_evidence_summary"] = profile.get("amazon_evidence_summary") or summarize_amazon_evidence(profile.get("amazon_links", []), snapshot["text"])
-    profile["amazon_backlink_found"] = bool(profile.get("amazon_links") or contains_amazon_buying_signal(snapshot["text"]))
+    profile["amazon_backlink_found"] = bool(profile.get("amazon_links") or profile.get("amazon_evidence_urls"))
     profile["public_emails"] = sorted(set(_ensure_list(profile.get("public_emails")) + list(snapshot["public_emails"])))
     profile["contact_page_url"] = profile.get("contact_page_url") or (snapshot["contact_links"][0] if snapshot["contact_links"] else "")
     profile["decision_maker_source_url"] = profile.get("decision_maker_source_url") or snapshot["url"] or url
@@ -276,6 +283,7 @@ def extract_brand_profile(url: str, minimax_api_key: str | None = None, llm_conf
         normalized["extraction_error"] = ""
         normalized["llm_provider_used"] = router.last_used_provider or ""
         normalized["llm_model_used"] = router.last_used_model or ""
+        normalized["llm_attempted_providers"] = list(getattr(router, "last_attempted_providers", []))
         return normalized
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning("Direct LLM extraction failed for %s: %s", url, exc)
@@ -287,6 +295,7 @@ def extract_brand_profile(url: str, minimax_api_key: str | None = None, llm_conf
             profile["extraction_error"] = str(exc)
             profile["llm_provider_used"] = router.last_used_provider or ""
             profile["llm_model_used"] = router.last_used_model or ""
+            profile["llm_attempted_providers"] = list(getattr(router, "last_attempted_providers", []))
             return profile
         blocked_profile = _heuristic_profile(url, snapshot)
         blocked_profile["extraction_method"] = "blocked_or_error"
@@ -296,4 +305,5 @@ def extract_brand_profile(url: str, minimax_api_key: str | None = None, llm_conf
         blocked_profile["extraction_error"] = str(exc)
         blocked_profile["llm_provider_used"] = router.last_used_provider or ""
         blocked_profile["llm_model_used"] = router.last_used_model or ""
+        blocked_profile["llm_attempted_providers"] = list(getattr(router, "last_attempted_providers", []))
         return blocked_profile

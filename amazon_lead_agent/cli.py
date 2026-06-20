@@ -13,7 +13,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default="config.yaml", help="Path to config YAML.")
     parser.add_argument(
         "--mode",
-        choices=("full", "discover", "enrich", "score", "draft"),
+        choices=("full", "discover", "enrich", "score", "draft", "tracer"),
         default="full",
         help="Pipeline stage to run.",
     )

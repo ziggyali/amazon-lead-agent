@@ -68,5 +68,85 @@ class GeminiJsonParsingTests(unittest.TestCase):
         self.assertEqual(client.last_used_model, "gemini-2.5-flash")
 
 
+class RouterFallbackTests(unittest.TestCase):
+    def test_minimax_request_failure_triggers_gemini_fallback(self):
+        class FailingMiniMax:
+            provider_name = "minimax"
+            last_used_provider = None
+            last_used_model = "MiniMax-M3"
+
+            def available(self):
+                return True
+
+            def generate_text(self, prompt, purpose="general"):
+                raise RuntimeError("minimax failed")
+
+            def generate_json(self, prompt, purpose="extraction"):
+                raise RuntimeError("minimax failed")
+
+        class OkGemini:
+            provider_name = "gemini"
+            last_used_provider = None
+            last_used_model = "gemini-2.5-flash"
+
+            def available(self):
+                return True
+
+            def generate_text(self, prompt, purpose="general"):
+                return "OK"
+
+            def generate_json(self, prompt, purpose="extraction"):
+                return {"status": "ok"}
+
+        with patch.dict(os.environ, {"LLM_PROVIDER": "minimax", "LLM_FALLBACK_PROVIDERS": "gemini"}, clear=False), \
+            patch.object(LLMRouter, "_build_minimax_client", return_value=FailingMiniMax()), \
+            patch.object(LLMRouter, "_build_gemini_client", return_value=OkGemini()):
+            router = LLMRouter(provider="minimax", fallback_providers="gemini")
+            text = router.generate_text("Reply with exactly OK.")
+
+        self.assertEqual(text, "OK")
+        self.assertEqual(router.last_used_provider, "gemini")
+        self.assertEqual([item["provider"] for item in router.last_attempted_providers], ["minimax", "gemini"])
+
+    def test_invalid_json_triggers_gemini_fallback_for_json_tasks(self):
+        class BadMiniMax:
+            provider_name = "minimax"
+            last_used_provider = None
+            last_used_model = "MiniMax-M3"
+
+            def available(self):
+                return True
+
+            def generate_text(self, prompt, purpose="general"):
+                return "bad"
+
+            def generate_json(self, prompt, purpose="extraction"):
+                raise ValueError("response did not contain valid JSON")
+
+        class OkGemini:
+            provider_name = "gemini"
+            last_used_provider = None
+            last_used_model = "gemini-2.5-flash"
+
+            def available(self):
+                return True
+
+            def generate_text(self, prompt, purpose="general"):
+                return "OK"
+
+            def generate_json(self, prompt, purpose="extraction"):
+                return {"brand_name": "Acme"}
+
+        with patch.dict(os.environ, {"LLM_PROVIDER": "minimax", "LLM_FALLBACK_PROVIDERS": "gemini"}, clear=False), \
+            patch.object(LLMRouter, "_build_minimax_client", return_value=BadMiniMax()), \
+            patch.object(LLMRouter, "_build_gemini_client", return_value=OkGemini()):
+            router = LLMRouter(provider="minimax", fallback_providers="gemini")
+            parsed = router.generate_json("Return JSON.")
+
+        self.assertEqual(parsed["brand_name"], "Acme")
+        self.assertEqual(router.last_used_provider, "gemini")
+        self.assertEqual([item["provider"] for item in router.last_attempted_providers], ["minimax", "gemini"])
+
+
 if __name__ == "__main__":
     unittest.main()

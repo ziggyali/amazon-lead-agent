@@ -17,6 +17,7 @@ from amazon_lead_agent.tools.sqlite_store import (
     record_outreach_event,
     upsert_lead,
 )
+from amazon_lead_agent.normalization import ensure_lead_identity
 
 
 LOGGER = logging.getLogger(__name__)
@@ -161,6 +162,7 @@ class StorageRouter:
         return get_leads_for_drafting(self._sqlite_conn, min_score, limit)
 
     def upsert_lead(self, lead: dict[str, Any], tab: str | None = None) -> str:
+        lead = ensure_lead_identity(lead)
         stage_tab = tab or self._stage_tab(lead)
         lead_id = str(lead.get("id") or "")
         if self.uses_sheets:

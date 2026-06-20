@@ -6,7 +6,7 @@ import logging
 from typing import Any
 import socket
 
-from amazon_lead_agent.normalization import make_lead_id
+from amazon_lead_agent.normalization import ensure_lead_identity, make_lead_id
 from amazon_lead_agent.tools import google_sheets
 
 
@@ -173,12 +173,14 @@ class SheetStore:
 
     def upsert_lead(self, lead: dict[str, Any], tab: str = "Lead Queue") -> str:
         canonical = _canonical_tab_name(tab)
-        payload = dict(lead)
+        payload = ensure_lead_identity(lead)
         if not payload.get("id"):
             company_name = payload.get("company_name") or payload.get("brand_name") or payload.get("website") or ""
             website = payload.get("website") or ""
             source = (payload.get("source_urls") or [payload.get("primary_source_url") or website or ""])[0]
             payload["id"] = make_lead_id(str(company_name), str(website), str(source))
+        if not payload.get("lead_id"):
+            payload["lead_id"] = payload.get("id") or make_lead_id(str(payload.get("company_name") or ""), str(payload.get("website") or ""), str((payload.get("source_urls") or [None])[0] or ""))
         if not payload.get("updated_at"):
             payload["updated_at"] = _utc_now()
         self._remember_row(canonical, payload)

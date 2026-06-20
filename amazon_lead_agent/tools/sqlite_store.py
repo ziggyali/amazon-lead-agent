@@ -6,7 +6,7 @@ from pathlib import Path
 import json
 import sqlite3
 
-from amazon_lead_agent.normalization import make_lead_id, normalize_company_name, normalize_domain
+from amazon_lead_agent.normalization import ensure_lead_identity, make_lead_id, normalize_company_name, normalize_domain
 
 
 def _utc_now() -> str:
@@ -185,12 +185,13 @@ def _json_list(value: object) -> str:
 
 
 def _lead_row(lead: dict) -> dict:
+    lead = ensure_lead_identity(lead)
     website = lead.get("website") or ""
     company_name = lead.get("company_name") or lead.get("brand_name") or website
     amazon_links = lead.get("amazon_links") or []
     source_urls = lead.get("source_urls") or []
     row = {
-        "id": lead.get("id") or make_lead_id(company_name, website, (amazon_links or [None])[0]),
+        "id": lead.get("id") or lead.get("lead_id") or make_lead_id(company_name, website, (amazon_links or [None])[0]),
         "company_name": company_name,
         "brand_name": lead.get("brand_name") or company_name,
         "normalized_company_name": lead.get("normalized_company_name") or normalize_company_name(company_name),

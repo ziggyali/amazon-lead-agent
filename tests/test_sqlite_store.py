@@ -117,6 +117,37 @@ class SQLiteStoreTests(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_duplicate_seed_rerun_dedupes_on_normalized_domain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "leads.db"
+            init_db(db_path)
+            conn = get_connection(db_path)
+            try:
+                lead_a = upsert_lead(
+                    conn,
+                    {
+                        "company_name": "Glossier",
+                        "website": "https://www.glossier.com",
+                        "category": "beauty",
+                        "status": "needs_enrichment",
+                    },
+                )
+                lead_b = upsert_lead(
+                    conn,
+                    {
+                        "company_name": "Glossier Inc.",
+                        "website": "https://glossier.com",
+                        "category": "beauty",
+                        "status": "needs_enrichment",
+                    },
+                )
+                conn.commit()
+                rows = conn.execute("SELECT COUNT(*) AS count FROM leads").fetchone()
+                self.assertEqual(rows["count"], 1)
+                self.assertEqual(lead_a, lead_b)
+            finally:
+                conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()
