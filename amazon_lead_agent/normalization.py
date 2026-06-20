@@ -32,6 +32,26 @@ SEED_BRAND_ALIASES = {
     "parachutehome.com": "Parachute Home",
 }
 
+GENERIC_TITLE_TOKENS = {
+    "official",
+    "shop",
+    "store",
+    "stores",
+    "products",
+    "product",
+    "skincare",
+    "beauty",
+    "wellness",
+    "supplements",
+    "pet",
+    "pets",
+    "home",
+    "kitchen",
+    "luxury",
+    "brand",
+    "brands",
+}
+
 
 def normalize_text(value: str | None) -> str:
     if not value:
@@ -74,6 +94,36 @@ def infer_brand_name_from_domain(value: str | None) -> str:
     return " ".join(token[:1].upper() + token[1:] for token in tokens)
 
 
+def _looks_like_generic_page_title(value: str | None) -> bool:
+    normalized = normalize_company_name(value)
+    if not normalized:
+        return False
+    tokens = [token for token in normalized.split() if token]
+    if len(tokens) >= 5:
+        return True
+    if len(tokens) >= 3 and any(token in GENERIC_TITLE_TOKENS for token in tokens):
+        return True
+    return False
+
+
+def resolve_canonical_brand_name(payload: dict) -> str:
+    seed_label = str(payload.get("seed_label") or payload.get("canonical_brand_name") or "").strip()
+    if seed_label:
+        return seed_label
+    brand_name = str(payload.get("brand_name") or "").strip()
+    company_name = str(payload.get("company_name") or "").strip()
+    website = str(payload.get("website") or payload.get("primary_source_url") or "").strip()
+    website_title = str(payload.get("website_title") or payload.get("title") or payload.get("page_title") or "").strip()
+    domain = normalize_domain(website)
+    inferred_name = infer_brand_name_from_domain(domain or website_title or website or company_name or brand_name)
+    for candidate in (brand_name, company_name):
+        if candidate and not _looks_like_generic_page_title(candidate):
+            return candidate
+    if inferred_name:
+        return inferred_name
+    return brand_name or company_name or ""
+
+
 def make_deterministic_lead_id(domain: str | None, category: str | None = None) -> str:
     fingerprint = "|".join(part for part in (normalize_domain(domain), normalize_text(category)) if part)
     if not fingerprint:
@@ -89,25 +139,14 @@ def ensure_lead_identity(lead: dict) -> dict:
         website = str(source_urls[0] or "").strip()
     domain = normalize_domain(website or payload.get("normalized_domain") or payload.get("lead_domain") or "")
     category = str(payload.get("category") or "").strip()
-    seed_label = str(payload.get("seed_label") or payload.get("canonical_brand_name") or "").strip()
-    company_name = str(payload.get("company_name") or payload.get("brand_name") or seed_label or "").strip()
-    inferred_name = infer_brand_name_from_domain(domain or website or company_name)
-    company_normalized = normalize_company_name(company_name)
-    if seed_label:
-        company_name = seed_label
-    elif not company_name or not company_normalized or company_name.lower() in {domain, (domain.replace(".", " ") if domain else "")}:
-        company_name = inferred_name or company_name or domain or ""
-    if seed_label:
-        payload["canonical_brand_name"] = seed_label
-        payload["brand_name"] = seed_label
-        payload["company_name"] = seed_label
-    else:
-        if not payload.get("canonical_brand_name"):
-            payload["canonical_brand_name"] = company_name
-        if not payload.get("brand_name"):
-            payload["brand_name"] = company_name
-        if not payload.get("company_name") or normalize_company_name(payload.get("company_name")) in {"", normalize_company_name(domain)}:
-            payload["company_name"] = company_name
+    canonical_brand_name = resolve_canonical_brand_name(payload)
+    inferred_name = infer_brand_name_from_domain(domain or website or canonical_brand_name)
+    if canonical_brand_name:
+        payload["canonical_brand_name"] = canonical_brand_name
+    if not payload.get("brand_name") or _looks_like_generic_page_title(payload.get("brand_name")):
+        payload["brand_name"] = canonical_brand_name or inferred_name or payload.get("brand_name") or ""
+    if not payload.get("company_name") or _looks_like_generic_page_title(payload.get("company_name")) or normalize_company_name(payload.get("company_name")) in {"", normalize_company_name(domain)}:
+        payload["company_name"] = canonical_brand_name or inferred_name or payload.get("company_name") or ""
     if not payload.get("normalized_company_name"):
         payload["normalized_company_name"] = normalize_company_name(payload.get("company_name"))
     if domain and not payload.get("normalized_domain"):
@@ -120,7 +159,7 @@ def ensure_lead_identity(lead: dict) -> dict:
     payload["id"] = str(payload.get("id") or lead_id).strip() or lead_id
     payload["lead_id"] = str(payload.get("lead_id") or lead_id).strip() or lead_id
     if not payload.get("company_name"):
-        payload["company_name"] = company_name or inferred_name or domain or "Unknown"
+        payload["company_name"] = canonical_brand_name or inferred_name or domain or "Unknown"
     if not payload.get("brand_name"):
         payload["brand_name"] = payload["company_name"]
     if not payload.get("canonical_brand_name"):

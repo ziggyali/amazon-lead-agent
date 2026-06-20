@@ -5,7 +5,7 @@ from html import unescape
 from urllib.parse import urlparse, urlunparse
 import re
 
-from amazon_lead_agent.normalization import infer_brand_name_from_domain, normalize_company_name, normalize_domain
+from amazon_lead_agent.normalization import infer_brand_name_from_domain, normalize_company_name, normalize_domain, resolve_canonical_brand_name
 from amazon_lead_agent.tools.amazon_backlink_discovery import is_valid_amazon_url
 from amazon_lead_agent.tools.search import clean_search_result_url, get_last_search_stats, search_web
 
@@ -80,6 +80,9 @@ class AmazonEvidenceVerificationResult:
     structured_evidence_found: bool
     weak_text_signal_found: bool
     best_evidence_url: str
+    best_evidence_title: str
+    best_evidence_snippet: str
+    best_evidence_source: str
     best_evidence_confidence: str
     best_evidence_type: str
     best_evidence_reason: str
@@ -97,10 +100,14 @@ class AmazonEvidenceVerificationResult:
             "structured_evidence_found": self.structured_evidence_found,
             "weak_text_signal_found": self.weak_text_signal_found,
             "best_evidence_url": self.best_evidence_url,
+            "best_evidence_title": self.best_evidence_title,
+            "best_evidence_snippet": self.best_evidence_snippet,
+            "best_evidence_source": self.best_evidence_source,
             "best_evidence_confidence": self.best_evidence_confidence,
             "best_evidence_type": self.best_evidence_type,
             "best_evidence_reason": self.best_evidence_reason,
             "amazon_evidence_items": list(self.evidence_items),
+            "amazon_evidence_urls": [item.get("evidence_url") for item in self.evidence_items if item.get("evidence_url")],
             "amazon_backlink_found": self.structured_evidence_found,
             "amazon_evidence_summary": self._summary(),
             "search_stats": self.search_stats,
@@ -178,6 +185,20 @@ def _brand_search_queries(canonical_brand_name: str, root_domain: str) -> list[s
     ]
 
 
+def _best_item_fields(item: dict | None) -> tuple[str, str, str]:
+    if not item:
+        return "", "", ""
+    source = str(item.get("evidence_source") or "")
+    query = str(item.get("query") or "")
+    if query:
+        source = f"{source} | {query}" if source else query
+    return (
+        str(item.get("evidence_title") or ""),
+        str(item.get("evidence_snippet") or ""),
+        source,
+    )
+
+
 def _classify_search_result(brand: str, result: dict, query: str) -> dict:
     raw_url = result.get("url") or ""
     title = str(result.get("title") or "")
@@ -234,7 +255,7 @@ def _classify_search_result(brand: str, result: dict, query: str) -> dict:
 
 
 def verify_amazon_evidence(lead: dict, search_limit: int = 8) -> dict:
-    canonical_brand_name = str(lead.get("canonical_brand_name") or lead.get("seed_label") or lead.get("brand_name") or lead.get("company_name") or "").strip()
+    canonical_brand_name = resolve_canonical_brand_name(lead)
     website = str(lead.get("website") or "").strip()
     root_domain = normalize_domain(website)
     website_title = str(lead.get("website_title") or lead.get("title") or "").strip()
@@ -277,6 +298,25 @@ def verify_amazon_evidence(lead: dict, search_limit: int = 8) -> dict:
     if best_item is None and weak_items:
         best_item = weak_items[0]
 
+    best_url = str(best_item.get("evidence_url") if best_item else "").strip()
+    if best_item and not is_valid_amazon_url(best_url):
+        best_item = None
+        best_url = ""
+    if not best_item or not best_url:
+        structured_items = [item for item in structured_items if is_valid_amazon_url(str(item.get("evidence_url") or ""))]
+        if not structured_items:
+            best_item = None
+            best_url = ""
+
+    best_title, best_snippet, best_source = _best_item_fields(best_item)
+    amazon_evidence_urls = []
+    for item in structured_items:
+        url = str(item.get("evidence_url") or "").strip()
+        if is_valid_amazon_url(url) and url not in amazon_evidence_urls:
+            amazon_evidence_urls.append(url)
+    if best_url and best_url not in amazon_evidence_urls:
+        amazon_evidence_urls.insert(0, best_url)
+
     amazon_queries_run = list(queries)
     rejected_count = max(0, search_results_seen - len(structured_items) - len(weak_items))
     result = AmazonEvidenceVerificationResult(
@@ -286,16 +326,23 @@ def verify_amazon_evidence(lead: dict, search_limit: int = 8) -> dict:
         amazon_search_results_seen=search_results_seen,
         amazon_results_rejected_count=rejected_count,
         amazon_results_rejected_reasons=sorted(set(rejected_reasons)),
-        structured_evidence_found=bool(structured_items),
+        structured_evidence_found=bool(best_url and structured_items),
         weak_text_signal_found=bool(weak_items),
-        best_evidence_url=str(best_item.get("evidence_url") if best_item else ""),
+        best_evidence_url=best_url,
+        best_evidence_title=best_title,
+        best_evidence_snippet=best_snippet,
+        best_evidence_source=best_source,
         best_evidence_confidence=str(best_item.get("confidence") if best_item else ""),
         best_evidence_type=str(best_item.get("evidence_type") if best_item else ""),
         best_evidence_reason=str(best_item.get("reason") if best_item else ""),
         evidence_items=evidence_items,
         search_stats=get_last_search_stats(),
     )
-    return result.to_dict()
+    output = result.to_dict()
+    output["amazon_evidence_urls"] = amazon_evidence_urls
+    if output["structured_evidence_found"] and not output["best_evidence_url"]:
+        output["structured_evidence_found"] = False
+    return output
 
 
 def evidence_is_structured(item: dict | None) -> bool:
@@ -305,4 +352,3 @@ def evidence_is_structured(item: dict | None) -> bool:
         return True
     evidence_type = str(item.get("evidence_type") or "").strip().lower()
     return evidence_type in STRUCTURED_EVIDENCE_TYPES
-

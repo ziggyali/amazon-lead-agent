@@ -7,6 +7,7 @@ import re
 
 from amazon_lead_agent.llm.router import LLMRouter
 from amazon_lead_agent.prompts import load_prompt
+from amazon_lead_agent.normalization import infer_brand_name_from_domain
 from amazon_lead_agent.tools.amazon_backlink_discovery import (
     contains_amazon_buying_signal,
     extract_amazon_links,
@@ -98,7 +99,8 @@ def _build_snapshot(url: str) -> dict:
 def _heuristic_profile(url: str, snapshot: dict) -> dict:
     text = snapshot["text"]
     title = snapshot.get("title") or ""
-    company_name = title.split("|")[0].split("-")[0].strip() or re.sub(r"https?://", "", snapshot["url"]).split("/")[0]
+    inferred_brand = infer_brand_name_from_domain(snapshot["url"] or url)
+    company_name = inferred_brand or title.split("|")[0].split("-")[0].strip() or re.sub(r"https?://", "", snapshot["url"]).split("/")[0]
     pain_points = []
     for token in ("inventory", "ads", "marketplace", "operations", "amazon", "fulfillment", "clean", "conversion"):
         if token in text.lower():
@@ -107,6 +109,7 @@ def _heuristic_profile(url: str, snapshot: dict) -> dict:
     return {
         "company_name": company_name,
         "brand_name": company_name,
+        "canonical_brand_name": company_name,
         "website": snapshot["url"] or url,
         "website_title": title,
         "category": "",
@@ -155,7 +158,8 @@ def _normalize_profile(profile: dict, url: str, snapshot: dict, extraction_metho
         profile["company_name"] = profile.get("company_name") or canonical_brand_name
         profile["brand_name"] = profile.get("brand_name") or canonical_brand_name
     else:
-        profile["company_name"] = profile.get("company_name") or profile.get("brand_name") or profile["website_title"] or snapshot["url"]
+        inferred_brand = infer_brand_name_from_domain(profile["website"])
+        profile["company_name"] = profile.get("company_name") or profile.get("brand_name") or inferred_brand or snapshot["url"]
         profile["brand_name"] = profile.get("brand_name") or profile["company_name"]
     amazon_links = [link for link in _ensure_list(profile.get("amazon_links")) + list(snapshot["amazon_links"]) if is_valid_amazon_url(link)]
     amazon_evidence_urls = [url for url in _ensure_list(profile.get("amazon_evidence_url")) + _ensure_list(profile.get("amazon_evidence_urls")) if is_valid_amazon_url(url)]

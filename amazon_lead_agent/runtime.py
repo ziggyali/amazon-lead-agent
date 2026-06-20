@@ -12,6 +12,7 @@ from amazon_lead_agent.agents.outreach_agent import run_outreach
 from amazon_lead_agent.agents.scoring_agent import run_scoring
 from amazon_lead_agent.agents.scoring_agent import classify_scored_lead, score_lead
 from amazon_lead_agent.reporting import write_campaign_report
+from amazon_lead_agent.tools.amazon_backlink_discovery import is_valid_amazon_url
 from amazon_lead_agent.tools.amazon_evidence_verification import verify_amazon_evidence
 from amazon_lead_agent.tools.scrapegraph_runner import extract_brand_profile
 from amazon_lead_agent.tools.storage_router import get_storage_router
@@ -42,6 +43,18 @@ def _safe_commit(storage: Any, report: dict[str, Any], *, label: str) -> str:
         return f"failed: {exc}"
 
 
+def _canonical_amazon_evidence_urls(lead: dict[str, Any]) -> list[str]:
+    urls: list[str] = []
+    for url in lead.get("amazon_evidence_urls") or []:
+        candidate = str(url or "").strip()
+        if candidate and is_valid_amazon_url(candidate) and candidate not in urls:
+            urls.append(candidate)
+    best_url = str(lead.get("best_evidence_url") or "").strip()
+    if best_url and is_valid_amazon_url(best_url) and best_url not in urls:
+        urls.insert(0, best_url)
+    return urls
+
+
 def _tracer_draft_body(lead: dict[str, Any], evidence_url: str) -> str:
     brand = lead.get("brand_name") or lead.get("company_name") or "your team"
     category = lead.get("category") or "your category"
@@ -52,7 +65,7 @@ def _tracer_draft_body(lead: dict[str, Any], evidence_url: str) -> str:
     parts = [
         f"Hi {brand} team,",
         "",
-        f"I found a public Amazon signal on your site: {amazon_summary}.",
+        f"I found a verified Amazon signal: {amazon_summary}.",
         f"Evidence: {evidence_url}",
         f"That makes me think there may be an opportunity around {pains} for your {category} brand.",
     ]
@@ -110,6 +123,13 @@ def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
         handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
 
 
+def _append_text_log(path: Path, message: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).isoformat()
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(f"[{timestamp}] {message}\n")
+
+
 def _write_tracer_summary(path: Path, report: dict[str, Any]) -> None:
     lines = [
         "# Tracer Bullet Summary",
@@ -143,8 +163,13 @@ def _write_tracer_summary(path: Path, report: dict[str, Any]) -> None:
         ]
     )
     for item in report.get("tracer_results", []):
+        evidence_urls = item.get("amazon_evidence_urls") or []
+        if not evidence_urls:
+            best_url = str(item.get("best_evidence_url") or "").strip()
+            if best_url:
+                evidence_urls = [best_url]
         lines.append(
-            f"| {item.get('brand_name', '')} | {item.get('canonical_brand_name', '') or 'none'} | {item.get('website_title', '') or 'none'} | {', '.join(item.get('amazon_evidence_urls', [])) or 'none'} | {item.get('contact_url', '') or 'none'} | {item.get('decision_maker_name', '') or 'none'} | {item.get('draft_preview_subject', '') or 'blocked'} |",
+            f"| {item.get('brand_name', '')} | {item.get('canonical_brand_name', '') or 'none'} | {item.get('website_title', '') or 'none'} | {', '.join(evidence_urls) or 'none'} | {item.get('contact_url', '') or 'none'} | {item.get('decision_maker_name', '') or 'none'} | {item.get('draft_preview_subject', '') or 'blocked'} |",
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -152,7 +177,8 @@ def _write_tracer_summary(path: Path, report: dict[str, Any]) -> None:
 
 def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = True) -> dict[str, Any]:
     storage = get_storage_router(config, db_path)
-    tracer_dir = Path("logs")
+    tracer_dir = Path("logs").resolve()
+    tracer_log = tracer_dir / "tracer_run.log"
     tracer_jsonl = tracer_dir / "tracer_bullet_report.jsonl"
     tracer_summary = tracer_dir / "tracer_bullet_summary.md"
     report: dict[str, Any] = {
@@ -176,12 +202,14 @@ def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = Tru
         "errors": 0,
         "manual_review_table": [],
         "tracer_results": [],
+        "tracer_log_path": str(tracer_log),
         "tracer_report_path": str(tracer_jsonl),
         "tracer_summary_path": str(tracer_summary),
     }
     allowed_categories = {str(item).strip().lower() for item in config.get("campaign", {}).get("categories", []) if str(item).strip()}
     pending_updates: list[dict[str, Any]] = []
     try:
+        _append_text_log(tracer_log, f"tracer run started dry_run={dry_run}")
         candidates = storage.get_leads_for_enrichment(8)
         for lead in candidates[:8]:
             lead = ensure_lead_identity(lead)
@@ -222,11 +250,19 @@ def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = Tru
             final["lead_id"] = final.get("lead_id") or final.get("id") or ""
             final["id"] = final.get("id") or final["lead_id"]
             final["lead_id"] = final.get("lead_id") or final["id"]
-            if structured_evidence:
-                evidence_urls = merged.get("amazon_evidence_urls") or merged.get("amazon_links") or []
-                evidence_url = str((evidence_urls or [merged.get("website", "")])[0] or "")
+            canonical_evidence_urls = _canonical_amazon_evidence_urls(merged)
+            final["amazon_evidence_urls"] = canonical_evidence_urls
+            best_evidence_url = str(verification.get("best_evidence_url") or final.get("best_evidence_url") or "").strip()
+            best_evidence_valid = bool(best_evidence_url and is_valid_amazon_url(best_evidence_url))
+            final["best_evidence_url"] = best_evidence_url if best_evidence_valid else ""
+            final["best_evidence_type"] = verification.get("best_evidence_type", "")
+            final["best_evidence_confidence"] = verification.get("best_evidence_confidence", "")
+            final["best_evidence_title"] = verification.get("best_evidence_title", "")
+            final["best_evidence_snippet"] = verification.get("best_evidence_snippet", "")
+            final["best_evidence_source"] = verification.get("best_evidence_source", "")
+            if structured_evidence and best_evidence_valid:
                 final["draft_preview_subject"] = f"Quick idea for {final.get('brand_name') or final.get('company_name')}'s Amazon growth"
-                final["draft_preview_body"] = _tracer_draft_body(final, evidence_url)
+                final["draft_preview_body"] = _tracer_draft_body(final, final["best_evidence_url"])
                 final["draft_subject"] = final["draft_preview_subject"]
                 final["draft_body"] = final["draft_preview_body"]
                 final["status"] = "draft_preview"
@@ -237,6 +273,7 @@ def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = Tru
                 final["status"] = "needs_enrichment"
                 final["review_status"] = "needs_enrichment"
                 final["send_status"] = "not_eligible"
+                final["draft_block_reason"] = "missing_structured_amazon_evidence_url" if structured_evidence and not best_evidence_valid else "missing_structured_amazon_evidence"
                 report["tracer_drafts_blocked_due_missing_evidence"] += 1
             pending_updates.append(final)
             report["llm_providers_used"].append(str(final.get("llm_provider_used") or ""))
@@ -270,9 +307,12 @@ def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = Tru
                     "structured_amazon_evidence": structured_evidence,
                     "weak_text_signal_found": weak_text_signal,
                     "best_evidence_url": verification.get("best_evidence_url", ""),
+                    "best_evidence_title": verification.get("best_evidence_title", ""),
+                    "best_evidence_snippet": verification.get("best_evidence_snippet", ""),
+                    "best_evidence_source": verification.get("best_evidence_source", ""),
                     "best_evidence_confidence": verification.get("best_evidence_confidence", ""),
                     "best_evidence_type": verification.get("best_evidence_type", ""),
-                    "amazon_evidence_urls": final.get("amazon_evidence_urls", []),
+                    "amazon_evidence_urls": canonical_evidence_urls,
                     "contact_method": contact_fields.get("contact_method"),
                     "contact_url": contact_fields.get("contact_url"),
                     "contact_email": contact_fields.get("contact_email"),
@@ -304,9 +344,13 @@ def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = Tru
                     "structured_evidence_found": structured_evidence,
                     "weak_text_signal_found": weak_text_signal,
                     "best_evidence_url": verification.get("best_evidence_url", ""),
+                    "best_evidence_title": verification.get("best_evidence_title", ""),
+                    "best_evidence_snippet": verification.get("best_evidence_snippet", ""),
+                    "best_evidence_source": verification.get("best_evidence_source", ""),
                     "best_evidence_confidence": verification.get("best_evidence_confidence", ""),
                     "contact_url": contact_fields.get("contact_url"),
                     "decision_maker_name": contact_fields.get("decision_maker_name"),
+                    "draft_block_reason": final.get("draft_block_reason", ""),
                     "draft_preview_subject": final.get("draft_preview_subject", ""),
                 }
             )
@@ -357,6 +401,10 @@ def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = Tru
         report["brands_without_evidence"] = report["tracer_brands_without_evidence"]
         report["contact_paths_found"] = report["tracer_contact_paths_found"]
         report["decision_makers_found"] = report["tracer_decision_makers_found"]
+        _append_text_log(
+            tracer_log,
+            f"tracer run completed brands={report['brands_processed']} evidence={report['tracer_brands_with_verified_amazon_evidence']} drafts={report['tracer_drafts_generated']} errors={report['errors']}",
+        )
         report["tracer_success"] = (
             report["tracer_brands_with_verified_amazon_evidence"] >= 3
             and report["tracer_brands_without_evidence"] >= 0

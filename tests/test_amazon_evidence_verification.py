@@ -25,6 +25,7 @@ class AmazonEvidenceVerificationTests(unittest.TestCase):
         queries = [call.args[0] for call in mock_search_web.call_args_list]
         self.assertTrue(all("Tatcha" in query for query in queries))
         self.assertTrue(all("Luxury Japanese Skincare Products" not in query for query in queries))
+        self.assertEqual(result["amazon_evidence_urls"], [])
 
     @patch("amazon_lead_agent.tools.amazon_evidence_verification.search_web")
     def test_valid_storefront_search_result_counts_as_structured_evidence(self, mock_search_web) -> None:
@@ -48,6 +49,7 @@ class AmazonEvidenceVerificationTests(unittest.TestCase):
         self.assertEqual(result["best_evidence_type"], "amazon_storefront_search_result")
         self.assertEqual(result["best_evidence_confidence"], "high")
         self.assertTrue(result["amazon_backlink_found"])
+        self.assertEqual(result["best_evidence_source"].split("|")[0].strip(), "search_index")
 
     @patch("amazon_lead_agent.tools.amazon_evidence_verification.search_web")
     def test_valid_product_search_result_counts_as_medium_confidence(self, mock_search_web) -> None:
@@ -70,6 +72,8 @@ class AmazonEvidenceVerificationTests(unittest.TestCase):
         self.assertTrue(result["structured_evidence_found"])
         self.assertEqual(result["best_evidence_type"], "amazon_product_search_result")
         self.assertEqual(result["best_evidence_confidence"], "medium")
+        self.assertEqual(result["best_evidence_title"], "Tatcha Dewy Skin Cream")
+        self.assertIn("by Tatcha", result["best_evidence_snippet"])
 
     @patch("amazon_lead_agent.tools.amazon_evidence_verification.search_web")
     def test_generic_amazon_search_url_does_not_count_as_verified_evidence(self, mock_search_web) -> None:
@@ -92,6 +96,7 @@ class AmazonEvidenceVerificationTests(unittest.TestCase):
         self.assertFalse(result["structured_evidence_found"])
         self.assertTrue(result["weak_text_signal_found"])
         self.assertEqual(result["best_evidence_type"], "weak_text_signal")
+        self.assertTrue(result["best_evidence_url"].startswith("https://www.amazon.com/s"))
 
     @patch("amazon_lead_agent.tools.amazon_evidence_verification.search_web")
     def test_manual_amazon_evidence_url_counts_as_verified(self, mock_search_web) -> None:
@@ -111,6 +116,7 @@ class AmazonEvidenceVerificationTests(unittest.TestCase):
         self.assertEqual(result["best_evidence_type"], "manual_verified_amazon_url")
         self.assertEqual(result["best_evidence_confidence"], "high")
         self.assertEqual(result["amazon_evidence_items"][0]["evidence_source"], "manual_sheet_override")
+        self.assertEqual(result["best_evidence_source"], "manual_sheet_override")
 
 
 if __name__ == "__main__":
