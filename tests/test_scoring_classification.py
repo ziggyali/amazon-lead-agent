@@ -124,6 +124,49 @@ class ScoringClassificationTests(unittest.TestCase):
         outcome = classify_scored_lead(lead, 75, allowed_categories={"beauty"})
         self.assertEqual(outcome["status"], "needs_enrichment")
 
+    def test_weak_text_signal_item_does_not_approve(self) -> None:
+        lead = {
+            "score": 95,
+            "tier": "A",
+            "company_name": "Brand Example",
+            "website": "https://brand.example.com",
+            "category": "beauty",
+            "amazon_evidence_items": [
+                {
+                    "evidence_type": "weak_text_signal",
+                    "evidence_url": "https://www.amazon.com/s?k=brand",
+                    "structured": False,
+                }
+            ],
+            "public_emails": ["hello@brand.example.com"],
+            "contact_page_url": "https://brand.example.com/contact",
+            "extraction_method": "minimax_direct_m3",
+        }
+        outcome = classify_scored_lead(lead, 75, allowed_categories={"beauty"})
+        self.assertEqual(outcome["status"], "needs_enrichment")
+        self.assertEqual(outcome["send_status"], "not_eligible")
+
+    def test_structured_amazon_evidence_item_can_approve(self) -> None:
+        lead = {
+            "score": 95,
+            "tier": "A",
+            "company_name": "Brand Example",
+            "website": "https://brand.example.com",
+            "category": "beauty",
+            "amazon_evidence_items": [
+                {
+                    "evidence_type": "amazon_storefront_search_result",
+                    "evidence_url": "https://www.amazon.com/stores/brand",
+                    "structured": True,
+                }
+            ],
+            "public_emails": ["hello@brand.example.com"],
+            "contact_page_url": "https://brand.example.com/contact",
+            "extraction_method": "minimax_direct_m3",
+        }
+        outcome = classify_scored_lead(lead, 75, allowed_categories={"beauty"})
+        self.assertEqual(outcome["status"], "approved")
+
     def test_contact_form_queue_requires_verified_amazon_evidence(self) -> None:
         lead = {
             "score": 80,

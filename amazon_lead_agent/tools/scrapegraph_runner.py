@@ -108,6 +108,7 @@ def _heuristic_profile(url: str, snapshot: dict) -> dict:
         "company_name": company_name,
         "brand_name": company_name,
         "website": snapshot["url"] or url,
+        "website_title": title,
         "category": "",
         "country": "",
         "description": text[:800],
@@ -148,8 +149,14 @@ def _build_prompt(url: str, snapshot: dict) -> str:
 def _normalize_profile(profile: dict, url: str, snapshot: dict, extraction_method: str) -> dict:
     profile = dict(profile or {})
     profile["website"] = profile.get("website") or snapshot["url"] or url
-    profile["company_name"] = profile.get("company_name") or profile.get("brand_name") or snapshot.get("title") or snapshot["url"]
-    profile["brand_name"] = profile.get("brand_name") or profile["company_name"]
+    profile["website_title"] = profile.get("website_title") or snapshot.get("title") or ""
+    canonical_brand_name = str(profile.get("canonical_brand_name") or profile.get("seed_label") or "").strip()
+    if canonical_brand_name:
+        profile["company_name"] = profile.get("company_name") or canonical_brand_name
+        profile["brand_name"] = profile.get("brand_name") or canonical_brand_name
+    else:
+        profile["company_name"] = profile.get("company_name") or profile.get("brand_name") or profile["website_title"] or snapshot["url"]
+        profile["brand_name"] = profile.get("brand_name") or profile["company_name"]
     amazon_links = [link for link in _ensure_list(profile.get("amazon_links")) + list(snapshot["amazon_links"]) if is_valid_amazon_url(link)]
     amazon_evidence_urls = [url for url in _ensure_list(profile.get("amazon_evidence_url")) + _ensure_list(profile.get("amazon_evidence_urls")) if is_valid_amazon_url(url)]
     profile["amazon_links"] = sorted(set(amazon_links))

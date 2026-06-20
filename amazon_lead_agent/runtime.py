@@ -11,8 +11,8 @@ from amazon_lead_agent.agents.extraction_agent import run_extraction
 from amazon_lead_agent.agents.outreach_agent import run_outreach
 from amazon_lead_agent.agents.scoring_agent import run_scoring
 from amazon_lead_agent.agents.scoring_agent import classify_scored_lead, score_lead
-from amazon_lead_agent.tools.amazon_backlink_discovery import has_verified_amazon_evidence
 from amazon_lead_agent.reporting import write_campaign_report
+from amazon_lead_agent.tools.amazon_evidence_verification import verify_amazon_evidence
 from amazon_lead_agent.tools.scrapegraph_runner import extract_brand_profile
 from amazon_lead_agent.tools.storage_router import get_storage_router
 from amazon_lead_agent.normalization import ensure_lead_identity
@@ -138,13 +138,13 @@ def _write_tracer_summary(path: Path, report: dict[str, Any]) -> None:
             "",
             "## Evidence Details",
             "",
-            "| Brand | Evidence URL(s) | Contact Path | Decision Maker | Draft Preview |",
-            "| --- | --- | --- | --- | --- |",
+            "| Brand | Canonical Brand | Website Title | Evidence URL(s) | Contact Path | Decision Maker | Draft Preview |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for item in report.get("tracer_results", []):
         lines.append(
-            f"| {item.get('brand_name', '')} | {', '.join(item.get('amazon_evidence_urls', [])) or 'none'} | {item.get('contact_url', '') or 'none'} | {item.get('decision_maker_name', '') or 'none'} | {item.get('draft_preview_subject', '') or 'blocked'} |",
+            f"| {item.get('brand_name', '')} | {item.get('canonical_brand_name', '') or 'none'} | {item.get('website_title', '') or 'none'} | {', '.join(item.get('amazon_evidence_urls', [])) or 'none'} | {item.get('contact_url', '') or 'none'} | {item.get('decision_maker_name', '') or 'none'} | {item.get('draft_preview_subject', '') or 'blocked'} |",
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -166,6 +166,10 @@ def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = Tru
         "tracer_decision_makers_found": 0,
         "tracer_drafts_generated": 0,
         "tracer_drafts_blocked_due_missing_evidence": 0,
+        "tracer_amazon_queries_run": 0,
+        "tracer_amazon_search_results_seen": 0,
+        "tracer_amazon_results_rejected_count": 0,
+        "tracer_amazon_weak_text_signal_count": 0,
         "tracer_llm_attempted_providers": [],
         "llm_providers_used": [],
         "storage_flush_status": "pending",
@@ -188,9 +192,16 @@ def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = Tru
             except Exception as exc:  # noqa: BLE001
                 report["errors"] += 1
                 profile = {"extraction_method": "blocked_or_error", "extraction_error": str(exc), "notes": str(exc)}
-            merged = {**lead, **profile}
-            merged = ensure_lead_identity(merged)
-            structured_evidence = has_verified_amazon_evidence(merged)
+            merged = ensure_lead_identity({**lead, **profile})
+            verification = verify_amazon_evidence(merged)
+            merged = ensure_lead_identity({**merged, **verification})
+            structured_evidence = bool(verification.get("structured_evidence_found"))
+            weak_text_signal = bool(verification.get("weak_text_signal_found"))
+            report["tracer_amazon_queries_run"] += len(verification.get("amazon_queries_run", []))
+            report["tracer_amazon_search_results_seen"] += int(verification.get("amazon_search_results_seen", 0))
+            report["tracer_amazon_results_rejected_count"] += int(verification.get("amazon_results_rejected_count", 0))
+            if weak_text_signal:
+                report["tracer_amazon_weak_text_signal_count"] += 1
             if structured_evidence:
                 report["tracer_brands_with_verified_amazon_evidence"] += 1
             else:
@@ -239,6 +250,8 @@ def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = Tru
                 tracer_jsonl,
                 {
                     "lead_id": final.get("lead_id"),
+                    "canonical_brand_name": final.get("canonical_brand_name"),
+                    "website_title": final.get("website_title"),
                     "brand_name": final.get("brand_name"),
                     "website": final.get("website"),
                     "status": final.get("status"),
@@ -250,7 +263,15 @@ def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = Tru
                     "llm_provider_used": final.get("llm_provider_used"),
                     "llm_model_used": final.get("llm_model_used"),
                     "llm_attempted_providers": final.get("llm_attempted_providers", []),
+                    "amazon_queries_run": verification.get("amazon_queries_run", []),
+                    "amazon_search_results_seen": verification.get("amazon_search_results_seen", 0),
+                    "amazon_results_rejected_count": verification.get("amazon_results_rejected_count", 0),
+                    "amazon_results_rejected_reasons": verification.get("amazon_results_rejected_reasons", []),
                     "structured_amazon_evidence": structured_evidence,
+                    "weak_text_signal_found": weak_text_signal,
+                    "best_evidence_url": verification.get("best_evidence_url", ""),
+                    "best_evidence_confidence": verification.get("best_evidence_confidence", ""),
+                    "best_evidence_type": verification.get("best_evidence_type", ""),
                     "amazon_evidence_urls": final.get("amazon_evidence_urls", []),
                     "contact_method": contact_fields.get("contact_method"),
                     "contact_url": contact_fields.get("contact_url"),
@@ -262,6 +283,8 @@ def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = Tru
             report["manual_review_table"].append(
                 {
                     "brand_name": final.get("brand_name", ""),
+                    "canonical_brand_name": final.get("canonical_brand_name", ""),
+                    "website_title": final.get("website_title", ""),
                     "evidence_accuracy": 5 if structured_evidence else 2,
                     "contact_usefulness": 4 if contact_fields.get("contact_method") != "unknown" else 1,
                     "draft_quality": 4 if structured_evidence else 1,
@@ -271,7 +294,17 @@ def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = Tru
             report["tracer_results"].append(
                 {
                     "brand_name": final.get("brand_name", ""),
+                    "canonical_brand_name": final.get("canonical_brand_name", ""),
+                    "website_title": final.get("website_title", ""),
                     "amazon_evidence_urls": final.get("amazon_evidence_urls", []),
+                    "amazon_queries_run": verification.get("amazon_queries_run", []),
+                    "amazon_search_results_seen": verification.get("amazon_search_results_seen", 0),
+                    "amazon_results_rejected_count": verification.get("amazon_results_rejected_count", 0),
+                    "amazon_results_rejected_reasons": verification.get("amazon_results_rejected_reasons", []),
+                    "structured_evidence_found": structured_evidence,
+                    "weak_text_signal_found": weak_text_signal,
+                    "best_evidence_url": verification.get("best_evidence_url", ""),
+                    "best_evidence_confidence": verification.get("best_evidence_confidence", ""),
                     "contact_url": contact_fields.get("contact_url"),
                     "decision_maker_name": contact_fields.get("decision_maker_name"),
                     "draft_preview_subject": final.get("draft_preview_subject", ""),
@@ -389,6 +422,10 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
         "dedupe_cache_unavailable": False,
         "storage_flush_status": "pending",
         "storage_mode_used": _storage_mode_label(storage),
+        "tracer_amazon_queries_run": 0,
+        "tracer_amazon_search_results_seen": 0,
+        "tracer_amazon_results_rejected_count": 0,
+        "tracer_amazon_weak_text_signal_count": 0,
         "llm_provider_counts": {},
         "llm_model_counts": {},
         "llm_attempted_providers": [],
@@ -402,6 +439,11 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
         "sheet_flush_errors": [],
         "sheet_mirror_status": "enabled" if storage.uses_sheets else "disabled",
         "top_5_leads": [],
+        "amazon_queries_run": 0,
+        "amazon_search_results_seen": 0,
+        "amazon_results_rejected_count": 0,
+        "amazon_results_rejected_reasons": [],
+        "weak_text_signal_found": False,
     }
 
     fatal_error: Exception | None = None
@@ -530,6 +572,18 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
         report["llm_provider_counts"] = report.get("llm_provider_counts", {})
         report["llm_model_counts"] = report.get("llm_model_counts", {})
         report["llm_attempted_providers"] = sorted({provider for provider in report.get("llm_attempted_providers", []) if provider})
+        report["amazon_queries_run"] = report["tracer_amazon_queries_run"]
+        report["amazon_search_results_seen"] = report["tracer_amazon_search_results_seen"]
+        report["amazon_results_rejected_count"] = report["tracer_amazon_results_rejected_count"]
+        report["amazon_results_rejected_reasons"] = sorted(
+            {
+                str(reason)
+                for item in report.get("tracer_results", [])
+                for reason in (item.get("amazon_results_rejected_reasons") or [])
+                if str(reason).strip()
+            },
+        )
+        report["weak_text_signal_found"] = report["tracer_amazon_weak_text_signal_count"] > 0
         report["notes_json"] = json.dumps(
             {
                 "mode": mode,
@@ -553,6 +607,10 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
                 "search_provider_counts": report["search_provider_counts"],
                 "provider_blocked_counts": report["provider_blocked_counts"],
                 "queries_attempted_by_provider": report["queries_attempted_by_provider"],
+                "tracer_amazon_queries_run": report["tracer_amazon_queries_run"],
+                "tracer_amazon_search_results_seen": report["tracer_amazon_search_results_seen"],
+                "tracer_amazon_results_rejected_count": report["tracer_amazon_results_rejected_count"],
+                "tracer_amazon_weak_text_signal_count": report["tracer_amazon_weak_text_signal_count"],
                 "query_budget_used": report["query_budget_used"],
                 "query_budget_remaining": report["query_budget_remaining"],
                 "discovery_runtime_seconds": report["discovery_runtime_seconds"],
@@ -588,6 +646,11 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
                 "llm_provider_counts": report["llm_provider_counts"],
                 "llm_model_counts": report["llm_model_counts"],
                 "llm_attempted_providers": report["llm_attempted_providers"],
+                "amazon_queries_run": report["amazon_queries_run"],
+                "amazon_search_results_seen": report["amazon_search_results_seen"],
+                "amazon_results_rejected_count": report["amazon_results_rejected_count"],
+                "amazon_results_rejected_reasons": report["amazon_results_rejected_reasons"],
+                "weak_text_signal_found": report["weak_text_signal_found"],
                 "top_5_leads": report["top_5_leads"],
             },
             ensure_ascii=False,
@@ -623,6 +686,10 @@ def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_
                     "search_provider_counts": report["search_provider_counts"],
                     "provider_blocked_counts": report["provider_blocked_counts"],
                     "queries_attempted_by_provider": report["queries_attempted_by_provider"],
+                    "tracer_amazon_queries_run": report["tracer_amazon_queries_run"],
+                    "tracer_amazon_search_results_seen": report["tracer_amazon_search_results_seen"],
+                    "tracer_amazon_results_rejected_count": report["tracer_amazon_results_rejected_count"],
+                    "tracer_amazon_weak_text_signal_count": report["tracer_amazon_weak_text_signal_count"],
                     "query_budget_used": report["query_budget_used"],
                     "query_budget_remaining": report["query_budget_remaining"],
                     "discovery_runtime_seconds": report["discovery_runtime_seconds"],

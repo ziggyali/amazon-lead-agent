@@ -38,6 +38,20 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(lead["company_name"], "The Honest Kitchen")
         self.assertEqual(lead["brand_name"], "The Honest Kitchen")
 
+    def test_seed_label_is_preserved_separately_from_homepage_title(self) -> None:
+        lead = ensure_lead_identity(
+            {
+                "website": "https://www.tatcha.com",
+                "category": "beauty",
+                "seed_label": "Tatcha",
+                "title": "Luxury Japanese Skincare Products",
+            }
+        )
+        self.assertEqual(lead["canonical_brand_name"], "Tatcha")
+        self.assertEqual(lead["company_name"], "Tatcha")
+        self.assertEqual(lead["brand_name"], "Tatcha")
+        self.assertEqual(lead["website_title"], "Luxury Japanese Skincare Products")
+
 
 if __name__ == "__main__":
     unittest.main()

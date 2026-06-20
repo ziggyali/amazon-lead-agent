@@ -89,19 +89,31 @@ def ensure_lead_identity(lead: dict) -> dict:
         website = str(source_urls[0] or "").strip()
     domain = normalize_domain(website or payload.get("normalized_domain") or payload.get("lead_domain") or "")
     category = str(payload.get("category") or "").strip()
-    company_name = str(payload.get("company_name") or payload.get("brand_name") or payload.get("seed_label") or "").strip()
+    seed_label = str(payload.get("seed_label") or payload.get("canonical_brand_name") or "").strip()
+    company_name = str(payload.get("company_name") or payload.get("brand_name") or seed_label or "").strip()
     inferred_name = infer_brand_name_from_domain(domain or website or company_name)
     company_normalized = normalize_company_name(company_name)
-    if not company_name or not company_normalized or company_name.lower() in {domain, (domain.replace(".", " ") if domain else "")}:
+    if seed_label:
+        company_name = seed_label
+    elif not company_name or not company_normalized or company_name.lower() in {domain, (domain.replace(".", " ") if domain else "")}:
         company_name = inferred_name or company_name or domain or ""
-    if not payload.get("brand_name"):
-        payload["brand_name"] = company_name
-    if not payload.get("company_name") or normalize_company_name(payload.get("company_name")) in {"", normalize_company_name(domain)}:
-        payload["company_name"] = company_name
+    if seed_label:
+        payload["canonical_brand_name"] = seed_label
+        payload["brand_name"] = seed_label
+        payload["company_name"] = seed_label
+    else:
+        if not payload.get("canonical_brand_name"):
+            payload["canonical_brand_name"] = company_name
+        if not payload.get("brand_name"):
+            payload["brand_name"] = company_name
+        if not payload.get("company_name") or normalize_company_name(payload.get("company_name")) in {"", normalize_company_name(domain)}:
+            payload["company_name"] = company_name
     if not payload.get("normalized_company_name"):
         payload["normalized_company_name"] = normalize_company_name(payload.get("company_name"))
     if domain and not payload.get("normalized_domain"):
         payload["normalized_domain"] = domain
+    if not payload.get("website_title"):
+        payload["website_title"] = str(payload.get("title") or payload.get("page_title") or "").strip()
     lead_id = str(payload.get("lead_id") or payload.get("id") or "").strip()
     if not lead_id:
         lead_id = make_deterministic_lead_id(domain or website or company_name, category)
@@ -111,6 +123,8 @@ def ensure_lead_identity(lead: dict) -> dict:
         payload["company_name"] = company_name or inferred_name or domain or "Unknown"
     if not payload.get("brand_name"):
         payload["brand_name"] = payload["company_name"]
+    if not payload.get("canonical_brand_name"):
+        payload["canonical_brand_name"] = payload["brand_name"]
     return payload
 
 

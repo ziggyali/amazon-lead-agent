@@ -86,8 +86,15 @@ def summarize_amazon_evidence(links: list[str], text: str) -> str:
 
 
 def has_verified_amazon_evidence(lead: dict) -> bool:
+    evidence_items = lead.get("amazon_evidence_items") or []
+    if isinstance(evidence_items, list):
+        for item in evidence_items:
+            if isinstance(item, dict):
+                evidence_type = str(item.get("evidence_type") or "").strip().lower()
+                if evidence_type in {"official_site_amazon_backlink", "amazon_storefront_search_result", "amazon_product_search_result", "amazon_brand_page_search_result", "manual_verified_amazon_url"} and is_valid_amazon_url(item.get("evidence_url")):
+                    return True
     evidence_urls: list[str] = []
-    for field in ("amazon_links", "amazon_links_json", "amazon_evidence_url", "amazon_evidence_urls", "source_urls", "source_urls_json"):
+    for field in ("amazon_links", "amazon_links_json", "amazon_evidence_url", "amazon_evidence_urls"):
         value = lead.get(field)
         if not value:
             continue
@@ -97,9 +104,9 @@ def has_verified_amazon_evidence(lead: dict) -> bool:
             evidence_urls.extend(str(item) for item in value if str(item).strip())
         else:
             evidence_urls.append(str(value))
-    if _truthy(lead.get("amazon_backlink_found")) and any(is_valid_amazon_url(url) for url in evidence_urls):
-        return True
-    return any(is_valid_amazon_url(url) for url in evidence_urls)
+    if any(is_valid_amazon_url(url) for url in evidence_urls):
+        return bool(_truthy(lead.get("amazon_backlink_found")) or evidence_urls)
+    return False
 
 
 def is_valid_amazon_url(url: str | None) -> bool:
