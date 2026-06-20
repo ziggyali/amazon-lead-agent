@@ -44,17 +44,23 @@ def _brand_tokens(brand_name: str) -> list[str]:
 
 
 def _brand_matches_text(brand_name: str, text: str) -> bool:
+    return _brand_match_strength(brand_name, text) != "none"
+
+
+def _brand_match_strength(brand_name: str, text: str) -> str:
     lowered = f" {unescape(text or '').lower()} "
     brand = normalize_company_name(brand_name)
     if not brand:
-        return False
+        return "none"
     if brand in lowered:
-        return True
+        return "exact"
     tokens = _brand_tokens(brand)
     if not tokens:
-        return False
+        return "none"
     hits = sum(1 for token in tokens if re.search(rf"\b{re.escape(token)}\b", lowered))
-    return hits >= max(1, len(tokens) // 2)
+    if hits >= max(1, len(tokens) // 2):
+        return "fuzzy"
+    return "none"
 
 
 def _normalize_amazon_url(url: str | None) -> str:
@@ -96,12 +102,13 @@ def _normalize_amazon_url(url: str | None) -> str:
 def _evidence_type_from_url(url: str, title: str, snippet: str) -> tuple[str, str, str]:
     parsed = urlparse(url)
     path = parsed.path.lower()
+    query = parsed.query.lower()
     text = f"{title} {snippet}".lower()
-    if "/stores/" in path or "visit the" in text and "store" in text:
+    if "/stores/" in path or "/stores" in path or ("visit the" in text and "store" in text):
         return "amazon_storefront_search_result", "high", "Amazon storefront/store page matched"
     if any(token in path for token in ("/dp/", "/gp/product/", "/product/")):
         return "amazon_product_search_result", "medium", "Amazon product page matched"
-    if any(token in path for token in ("/brand/", "/gp/brand/", "/stores")) or "brand" in text and "amazon" in text:
+    if any(token in path for token in ("/brand/", "/gp/brand/")) or ("me=" in query and path.startswith("/s")) or "brand" in text and "amazon" in text:
         return "amazon_brand_page_search_result", "medium", "Amazon brand page matched"
     if any(token in path for token in ("/s", "/search")):
         return "weak_text_signal", "low", "Generic Amazon search result page"
@@ -126,6 +133,9 @@ class AmazonEvidenceVerificationResult:
     best_evidence_type: str
     best_evidence_reason: str
     evidence_last_verified_at: str
+    amazon_candidate_results: list[dict]
+    accepted_evidence_results: list[dict]
+    rejected_evidence_results: list[dict]
     evidence_items: list[dict]
     search_stats: dict
 
@@ -160,6 +170,9 @@ class AmazonEvidenceVerificationResult:
             "amazon_backlink_found": self.structured_evidence_found,
             "amazon_evidence_summary": self._summary(),
             "cached_verified_amazon_url": best_url if self.best_evidence_type == "cached_verified_amazon_url" else "",
+            "amazon_candidate_results": list(self.amazon_candidate_results),
+            "accepted_evidence_results": list(self.accepted_evidence_results),
+            "rejected_evidence_results": list(self.rejected_evidence_results),
             "search_stats": self.search_stats,
         }
 
@@ -295,14 +308,35 @@ def _brand_search_queries(canonical_brand_name: str, root_domain: str) -> list[s
     domain = root_domain.strip()
     if not brand:
         return []
-    return [
+    queries = [
         f'site:amazon.com/stores "{brand}"',
+        f'site:amazon.com/stores/node "{brand}"',
+        f'site:amazon.com/brand "{brand}"',
         f'site:amazon.com "{brand}" "Visit the {brand} Store"',
+        f'site:amazon.com "{brand}" "Amazon storefront"',
         f'site:amazon.com "{brand}" "Amazon.com"',
         f'site:amazon.com "{brand}" "{domain}"' if domain else f'site:amazon.com "{brand}"',
+        f'"{brand}" "Visit the {brand} Store" "Amazon"',
         f'"{brand}" "Amazon Storefront"',
         f'"{brand}" "Amazon.com" "Store"',
+        f'"{brand}" "dp" Amazon',
     ]
+    return list(dict.fromkeys(queries))
+
+
+def _evidence_score(evidence_type: str, confidence: str, match_strength: str, text_match: bool) -> tuple[int, int, int, int]:
+    type_rank = {
+        "manual_verified_amazon_url": 5,
+        "official_site_amazon_backlink": 5,
+        "amazon_storefront_search_result": 4,
+        "amazon_product_search_result": 3,
+        "amazon_brand_page_search_result": 2,
+        "cached_verified_amazon_url": 1,
+        "weak_text_signal": 1,
+    }.get(evidence_type, 0)
+    confidence_rank = {"high": 3, "medium": 2, "low": 1}.get(confidence, 0)
+    match_rank = {"exact": 3, "fuzzy": 2, "none": 0}.get(match_strength, 0)
+    return (type_rank, confidence_rank, match_rank, 1 if text_match else 0)
 
 
 def _classify_search_result(brand: str, result: dict, query: str) -> dict:
@@ -331,7 +365,8 @@ def _classify_search_result(brand: str, result: dict, query: str) -> dict:
             "rejected_reason": reason,
         }
 
-    text_match = _brand_matches_text(brand, f"{title} {snippet}")
+    match_strength = _brand_match_strength(brand, f"{title} {snippet}")
+    text_match = match_strength != "none"
     if evidence_type == "weak_text_signal":
         return {
             "evidence_type": "weak_text_signal",
@@ -349,11 +384,39 @@ def _classify_search_result(brand: str, result: dict, query: str) -> dict:
             "decision": "accepted",
             "rejected": False,
             "text_match": text_match,
+            "match_strength": match_strength,
+        }
+
+    if not text_match:
+        rejection_reason = f"brand mismatch for {brand or 'unknown brand'}"
+        return {
+            "evidence_type": evidence_type,
+            "evidence_url": cleaned_url,
+            "evidence_title": title,
+            "evidence_snippet": snippet,
+            "evidence_source": "search_index",
+            "confidence": "low",
+            "reason": rejection_reason,
+            "structured": False,
+            "query": query,
+            "provider": provider,
+            "raw_url": raw_url,
+            "cleaned_url": cleaned_url,
+            "decision": "rejected",
+            "rejected": True,
+            "rejected_reason": rejection_reason,
+            "text_match": text_match,
+            "match_strength": match_strength,
         }
 
     structured = evidence_type in STRUCTURED_EVIDENCE_TYPES
-    if structured and not text_match and evidence_type != "official_site_amazon_backlink":
-        confidence = "medium"
+    if structured:
+        if evidence_type == "amazon_storefront_search_result":
+            confidence = "high"
+        elif evidence_type == "amazon_product_search_result":
+            confidence = "medium"
+        else:
+            confidence = "medium"
     return {
         "evidence_type": evidence_type,
         "evidence_url": cleaned_url,
@@ -370,6 +433,7 @@ def _classify_search_result(brand: str, result: dict, query: str) -> dict:
         "decision": "accepted",
         "rejected": False,
         "text_match": text_match,
+        "match_strength": match_strength,
     }
 
 
@@ -384,29 +448,64 @@ def verify_amazon_evidence(lead: dict, search_limit: int = 8) -> dict:
     evidence_items: list[dict] = []
     rejected_reasons: list[str] = []
     debug_records: list[dict] = []
+    candidate_results: list[dict] = []
+    accepted_results: list[dict] = []
+    rejected_results: list[dict] = []
 
     manual = _manual_override_item(lead, canonical_brand_name)
     if manual:
         evidence_items.append(manual)
         _cache_verified_evidence(canonical_brand_name, root_domain or website, manual)
-        debug_records.append(
-            {
-                "brand": canonical_brand_name,
-                "canonical_brand_name": canonical_brand_name,
-                "query": "manual_amazon_evidence_url",
-                "provider": "manual_sheet_override",
-                "raw_url": lead.get("manual_amazon_evidence_url") or "",
-                "cleaned_url": manual.get("evidence_url", ""),
-                "title": manual.get("evidence_title", ""),
-                "snippet": manual.get("evidence_snippet", ""),
-                "decision": "accepted",
-                "evidence_type": manual.get("evidence_type", ""),
-                "confidence": manual.get("confidence", ""),
-                "reason": manual.get("reason", ""),
-            }
-        )
+        manual_record = {
+            "brand": canonical_brand_name,
+            "canonical_brand_name": canonical_brand_name,
+            "query": "manual_amazon_evidence_url",
+            "provider": "manual_sheet_override",
+            "raw_url": lead.get("manual_amazon_evidence_url") or "",
+            "cleaned_url": manual.get("evidence_url", ""),
+            "title": manual.get("evidence_title", ""),
+            "snippet": manual.get("evidence_snippet", ""),
+            "decision": "accepted",
+            "evidence_type": manual.get("evidence_type", ""),
+            "confidence": manual.get("confidence", ""),
+            "reason": manual.get("reason", ""),
+        }
+        debug_records.append(manual_record)
+        candidate_results.append(manual_record)
+        accepted_results.append(manual_record)
 
     evidence_items.extend(_official_site_backlink_items(lead, canonical_brand_name))
+    cached_item = _load_verified_cache(canonical_brand_name, root_domain or website)
+    if cached_item:
+        cached_record = {
+            "brand": canonical_brand_name,
+            "canonical_brand_name": canonical_brand_name,
+            "query": "cached_verified_amazon_url",
+            "provider": "cached_prior_verified",
+            "raw_url": cached_item.get("best_evidence_url", ""),
+            "cleaned_url": cached_item.get("best_evidence_url", ""),
+            "title": cached_item.get("best_evidence_title", ""),
+            "snippet": cached_item.get("best_evidence_snippet", ""),
+            "decision": "accepted",
+            "evidence_type": "cached_verified_amazon_url",
+            "confidence": "medium",
+            "reason": "cached prior verified Amazon evidence",
+        }
+        debug_records.append(cached_record)
+        candidate_results.append(cached_record)
+        accepted_results.append(cached_record)
+        evidence_items.append(
+            {
+                "evidence_type": "cached_verified_amazon_url",
+                "evidence_url": cached_item.get("best_evidence_url", ""),
+                "evidence_title": cached_item.get("best_evidence_title", ""),
+                "evidence_snippet": cached_item.get("best_evidence_snippet", ""),
+                "evidence_source": "cached_prior_verified",
+                "confidence": "medium",
+                "reason": "cached prior verified Amazon evidence",
+                "structured": True,
+            }
+        )
 
     search_results_seen = 0
     for query in queries:
@@ -429,6 +528,8 @@ def verify_amazon_evidence(lead: dict, search_limit: int = 8) -> dict:
                     "reason": reason,
                 }
             )
+            candidate_results.append(debug_records[-1])
+            rejected_results.append(debug_records[-1])
             if status == "blocked":
                 rejected_reasons.append(reason)
             continue
@@ -436,69 +537,71 @@ def verify_amazon_evidence(lead: dict, search_limit: int = 8) -> dict:
             if not result.get("provider"):
                 result["provider"] = provider_label
             item = _classify_search_result(canonical_brand_name, result, query)
-            debug_records.append(
-                {
-                    "brand": canonical_brand_name,
-                    "canonical_brand_name": canonical_brand_name,
-                    "query": query,
-                    "provider": item.get("provider", provider_label),
-                    "raw_url": item.get("raw_url", ""),
-                    "cleaned_url": item.get("cleaned_url", ""),
-                    "title": item.get("evidence_title", ""),
-                    "snippet": item.get("evidence_snippet", ""),
-                    "decision": item.get("decision", "rejected"),
-                    "evidence_type": item.get("evidence_type", "") if not item.get("rejected") else "",
-                    "confidence": item.get("confidence", "") if not item.get("rejected") else "",
-                    "reason": item.get("reason", "") if not item.get("rejected") else item.get("rejected_reason", ""),
-                }
-            )
+            record = {
+                "brand": canonical_brand_name,
+                "canonical_brand_name": canonical_brand_name,
+                "query": query,
+                "provider": item.get("provider", provider_label),
+                "raw_url": item.get("raw_url", ""),
+                "cleaned_url": item.get("cleaned_url", ""),
+                "title": item.get("evidence_title", ""),
+                "snippet": item.get("evidence_snippet", ""),
+                "decision": item.get("decision", "rejected"),
+                "evidence_type": item.get("evidence_type", "") if not item.get("rejected") else "",
+                "confidence": item.get("confidence", "") if not item.get("rejected") else "",
+                "reason": item.get("reason", "") if not item.get("rejected") else item.get("rejected_reason", ""),
+            }
+            debug_records.append(record)
+            candidate_results.append(record)
             if item.get("rejected"):
                 if item.get("rejected_reason"):
                     rejected_reasons.append(str(item["rejected_reason"]))
+                rejected_results.append(record)
                 continue
             evidence_items.append(item)
+            accepted_results.append(record)
             if item.get("structured"):
                 _cache_verified_evidence(canonical_brand_name, root_domain or website, item)
 
     structured_items = [item for item in evidence_items if item.get("structured") and is_valid_amazon_url(str(item.get("evidence_url") or ""))]
     weak_items = [item for item in evidence_items if item.get("evidence_type") == "weak_text_signal"]
     best_item = None
-    best_rank = (-1, -1)
-    confidence_rank = {"high": 3, "medium": 2, "low": 1}
+    best_score = (-1, -1, -1, -1)
     for item in structured_items:
-        rank = (confidence_rank.get(str(item.get("confidence")), 0), 1 if item.get("evidence_type") == "official_site_amazon_backlink" else 0)
-        if rank > best_rank:
-            best_rank = rank
-            best_item = item
+        match_strength = str(item.get("match_strength") or "none")
+        item_score = _evidence_score(
+            str(item.get("evidence_type") or ""),
+            str(item.get("confidence") or ""),
+            match_strength,
+            bool(item.get("text_match")),
+        )
+        if item_score > best_score:
+            best_score = item_score
+            best_item = dict(item)
+
+    if best_item is None and weak_items:
+        best_item = dict(weak_items[0])
+    if best_item is None and cached_item:
+        best_item = {
+            "evidence_type": "cached_verified_amazon_url",
+            "evidence_url": cached_item.get("best_evidence_url", ""),
+            "evidence_title": cached_item.get("best_evidence_title", ""),
+            "evidence_snippet": cached_item.get("best_evidence_snippet", ""),
+            "evidence_source": "cached_prior_verified",
+            "confidence": "medium",
+            "reason": "cached prior verified Amazon evidence",
+            "structured": True,
+            "match_strength": "exact",
+            "text_match": True,
+        }
 
     evidence_last_verified_at = ""
-    if best_item and best_item.get("structured") and best_item.get("evidence_type") != "cached_verified_amazon_url":
+    if best_item and best_item.get("evidence_type") == "cached_verified_amazon_url":
+        evidence_last_verified_at = str(cached_item.get("evidence_last_verified_at") or "")
+    elif best_item and best_item.get("structured"):
         evidence_last_verified_at = datetime.now(timezone.utc).isoformat()
 
-    if not structured_items:
-        cached = _load_verified_cache(canonical_brand_name, root_domain or website)
-        if cached:
-            best_item = {
-                "evidence_type": "cached_verified_amazon_url",
-                "evidence_url": cached.get("best_evidence_url", ""),
-                "evidence_title": cached.get("best_evidence_title", ""),
-                "evidence_snippet": cached.get("best_evidence_snippet", ""),
-                "evidence_source": "cached_prior_verified",
-                "confidence": "medium",
-                "reason": "cached prior verified Amazon evidence",
-                "structured": True,
-            }
-            best_url = str(best_item.get("evidence_url") or "")
-            evidence_last_verified_at = str(cached.get("evidence_last_verified_at") or "")
-            structured_items = [best_item]
-        elif weak_items:
-            best_item = weak_items[0]
-            best_url = str(best_item.get("evidence_url") or "").strip()
-        else:
-            best_item = None
-            best_url = ""
-    else:
-        best_url = str(best_item.get("evidence_url") if best_item else "").strip()
+    best_url = str(best_item.get("evidence_url") if best_item else "").strip()
 
     best_title = str(best_item.get("evidence_title") if best_item else "")
     best_snippet = str(best_item.get("evidence_snippet") if best_item else "")
@@ -531,6 +634,9 @@ def verify_amazon_evidence(lead: dict, search_limit: int = 8) -> dict:
         best_evidence_type=str(best_item.get("evidence_type") if best_item else ""),
         best_evidence_reason=str(best_item.get("reason") if best_item else ""),
         evidence_last_verified_at=evidence_last_verified_at,
+        amazon_candidate_results=candidate_results,
+        accepted_evidence_results=accepted_results,
+        rejected_evidence_results=rejected_results,
         evidence_items=evidence_items,
         search_stats=get_last_search_stats(),
     )

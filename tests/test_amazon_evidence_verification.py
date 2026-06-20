@@ -32,11 +32,70 @@ class AmazonEvidenceVerificationTests(unittest.TestCase):
 
         self.assertEqual(result["canonical_brand_name"], "Tatcha")
         self.assertEqual(result["website_title"], "Luxury Japanese Skincare Products")
-        self.assertEqual(mock_search_web.call_count, 6)
+        self.assertEqual(mock_search_web.call_count, 11)
         queries = [call.args[0] for call in mock_search_web.call_args_list]
         self.assertTrue(all("Tatcha" in query for query in queries))
         self.assertTrue(all("Luxury Japanese Skincare Products" not in query for query in queries))
         self.assertEqual(result["amazon_evidence_urls"], [])
+
+    @patch("amazon_lead_agent.tools.amazon_evidence_verification.search_web_with_metadata")
+    def test_storefront_result_outranks_product_result(self, mock_search_web) -> None:
+        mock_search_web.return_value = (
+            [
+                {
+                    "url": "https://www.amazon.com/dp/B123456789",
+                    "title": "Tatcha Dewy Skin Cream",
+                    "snippet": "by Tatcha",
+                },
+                {
+                    "url": "https://www.amazon.com/stores/node/10525420011",
+                    "title": "Visit the Tatcha Store",
+                    "snippet": "Official Storefront",
+                },
+            ],
+            "bing_html",
+            "ok",
+        )
+        lead = {
+            "seed_label": "Tatcha",
+            "company_name": "Tatcha",
+            "website": "https://www.tatcha.com",
+            "category": "beauty",
+        }
+
+        result = verify_amazon_evidence(lead)
+
+        self.assertTrue(result["structured_evidence_found"])
+        self.assertEqual(result["best_evidence_type"], "amazon_storefront_search_result")
+        self.assertEqual(result["best_evidence_url"], "https://www.amazon.com/stores/node/10525420011")
+        self.assertIn("https://www.amazon.com/dp/B123456789", result["amazon_evidence_urls"])
+        self.assertIn("https://www.amazon.com/stores/node/10525420011", result["amazon_evidence_urls"])
+
+    @patch("amazon_lead_agent.tools.amazon_evidence_verification.search_web_with_metadata")
+    def test_unrelated_amazon_product_is_rejected(self, mock_search_web) -> None:
+        mock_search_web.return_value = (
+            [
+                {
+                    "url": "https://www.amazon.com/dp/B123456789",
+                    "title": "Random Hair Dryer",
+                    "snippet": "by Some Other Brand",
+                }
+            ],
+            "bing_html",
+            "ok",
+        )
+        lead = {
+            "seed_label": "Tatcha",
+            "company_name": "Tatcha",
+            "website": "https://www.tatcha.com",
+            "category": "beauty",
+        }
+
+        result = verify_amazon_evidence(lead)
+
+        self.assertFalse(result["structured_evidence_found"])
+        self.assertTrue(result["rejected_evidence_results"])
+        self.assertTrue(any("brand mismatch" in entry["reason"] for entry in result["rejected_evidence_results"]))
 
     @patch("amazon_lead_agent.tools.amazon_evidence_verification.search_web_with_metadata")
     def test_valid_storefront_search_result_counts_as_structured_evidence(self, mock_search_web) -> None:

@@ -16,7 +16,7 @@ from amazon_lead_agent.tools.amazon_backlink_discovery import is_valid_amazon_ur
 from amazon_lead_agent.tools.amazon_evidence_verification import STRUCTURED_EVIDENCE_TYPES, verify_amazon_evidence
 from amazon_lead_agent.tools.scrapegraph_runner import extract_brand_profile
 from amazon_lead_agent.tools.storage_router import get_storage_router
-from amazon_lead_agent.normalization import ensure_lead_identity
+from amazon_lead_agent.normalization import ensure_lead_identity, normalize_company_name
 
 
 LOGGER = logging.getLogger(__name__)
@@ -31,6 +31,25 @@ def _storage_mode_label(storage: Any) -> str:
     if bool(getattr(storage, "uses_sqlite", False)):
         return "sqlite"
     return ""
+
+
+def _normalize_brand_targets(brands: Any) -> list[str]:
+    if not brands:
+        return []
+    if isinstance(brands, str):
+        values = [part.strip() for part in brands.split(",")]
+    elif isinstance(brands, (list, tuple, set)):
+        values = [str(item).strip() for item in brands]
+    else:
+        values = [str(brands).strip()]
+    normalized = []
+    for value in values:
+        if not value:
+            continue
+        key = normalize_company_name(value)
+        if key and key not in normalized:
+            normalized.append(key)
+    return normalized
 
 
 def _safe_commit(storage: Any, report: dict[str, Any], *, label: str) -> str:
@@ -180,7 +199,7 @@ def _write_tracer_summary(path: Path, report: dict[str, Any]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = True) -> dict[str, Any]:
+def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = True, brands: Any = None) -> dict[str, Any]:
     storage = get_storage_router(config, db_path)
     tracer_dir = Path("logs").resolve()
     tracer_log = tracer_dir / "tracer_run.log"
@@ -210,12 +229,26 @@ def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = Tru
         "tracer_log_path": str(tracer_log),
         "tracer_report_path": str(tracer_jsonl),
         "tracer_summary_path": str(tracer_summary),
+        "tracer_brands_requested": _normalize_brand_targets(brands),
     }
     allowed_categories = {str(item).strip().lower() for item in config.get("campaign", {}).get("categories", []) if str(item).strip()}
     pending_updates: list[dict[str, Any]] = []
     try:
         _append_text_log(tracer_log, f"tracer run started dry_run={dry_run}")
         candidates = storage.get_leads_for_enrichment(8)
+        requested_brands = set(report["tracer_brands_requested"])
+        if requested_brands:
+            candidates = [
+                lead
+                for lead in candidates
+                if normalize_company_name(
+                    lead.get("canonical_brand_name")
+                    or lead.get("seed_label")
+                    or lead.get("brand_name")
+                    or lead.get("company_name")
+                    or "",
+                ) in requested_brands
+            ]
         for lead in candidates[:8]:
             lead = ensure_lead_identity(lead)
             report["brands_processed"] += 1
@@ -322,6 +355,9 @@ def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = Tru
                     "best_evidence_confidence": verification.get("best_evidence_confidence", ""),
                     "best_evidence_type": verification.get("best_evidence_type", ""),
                     "amazon_evidence_urls": canonical_evidence_urls,
+                    "amazon_candidate_results": verification.get("amazon_candidate_results", []),
+                    "accepted_evidence_results": verification.get("accepted_evidence_results", []),
+                    "rejected_evidence_results": verification.get("rejected_evidence_results", []),
                     "contact_method": contact_fields.get("contact_method"),
                     "contact_url": contact_fields.get("contact_url"),
                     "contact_email": contact_fields.get("contact_email"),
@@ -361,6 +397,9 @@ def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = Tru
                     "decision_maker_name": contact_fields.get("decision_maker_name"),
                     "draft_block_reason": final.get("draft_block_reason", ""),
                     "draft_preview_subject": final.get("draft_preview_subject", ""),
+                    "amazon_candidate_results": verification.get("amazon_candidate_results", []),
+                    "accepted_evidence_results": verification.get("accepted_evidence_results", []),
+                    "rejected_evidence_results": verification.get("rejected_evidence_results", []),
                 }
             )
             storage.upsert_lead(final, tab="Lead Queue")
@@ -426,9 +465,9 @@ def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = Tru
         storage.close()
 
 
-def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_run: bool = False) -> dict[str, Any]:
+def run_campaign(config: dict[str, Any], db_path: Path, mode: str = "full", dry_run: bool = False, brands: Any = None) -> dict[str, Any]:
     if mode == "tracer":
-        return run_tracer_bullet(config, db_path, dry_run=dry_run)
+        return run_tracer_bullet(config, db_path, dry_run=dry_run, brands=brands)
     storage = get_storage_router(config, db_path)
     report: dict[str, Any] = {
         "mode": mode,

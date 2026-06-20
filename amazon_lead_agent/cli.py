@@ -18,6 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Pipeline stage to run.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Run without creating Gmail drafts.")
+    parser.add_argument("--brands", default="", help="Comma-separated brand names for tracer mode.")
     return parser
 
 
@@ -29,7 +30,7 @@ def main(argv: list[str] | None = None) -> int:
     db_path = get_storage_path(config)
     if args.dry_run:
         print("DRY RUN enabled: Gmail drafts will not be created.")
-    report = run_campaign(config, db_path, mode=args.mode, dry_run=args.dry_run)
+    report = run_campaign(config, db_path, mode=args.mode, dry_run=args.dry_run, brands=args.brands)
     print(json.dumps(report, indent=2, ensure_ascii=False, sort_keys=True))
     return 0
 

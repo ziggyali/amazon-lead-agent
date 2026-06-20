@@ -68,6 +68,9 @@ class AmazonVerificationDebugTests(unittest.TestCase):
                 )
                 self.assertTrue(first["structured_evidence_found"])
                 self.assertEqual(first["best_evidence_type"], "amazon_product_search_result")
+                self.assertEqual(first["best_evidence_url"], "https://www.amazon.com/Glossier-Parfum-Travel-Spray-0-27/dp/B0DNCMDLSY")
+                self.assertIn("https://www.amazon.com/Glossier-Parfum-Travel-Spray-0-27/dp/B0DNCMDLSY", first["amazon_evidence_urls"])
+                self.assertTrue(first["amazon_candidate_results"])
 
                 mock_search.return_value = ([], "duckduckgo", "empty")
                 second = verify_amazon_evidence(
@@ -90,7 +93,17 @@ class AmazonVerificationDebugTests(unittest.TestCase):
 
     @patch("amazon_lead_agent.tools.amazon_evidence_verification.search_web_with_metadata")
     def test_manual_amazon_evidence_url_overrides_search_failure(self, mock_search) -> None:
-        mock_search.return_value = ([], "duckduckgo", "empty")
+        mock_search.return_value = (
+            [
+                {
+                    "url": "https://www.amazon.com/dp/B123456789",
+                    "title": "Brooklinen Sheet Set",
+                    "snippet": "by Brooklinen",
+                }
+            ],
+            "bing_html",
+            "ok",
+        )
         with tempfile.TemporaryDirectory() as tmpdir:
             old_cwd = os.getcwd()
             os.chdir(tmpdir)
@@ -112,6 +125,7 @@ class AmazonVerificationDebugTests(unittest.TestCase):
             self.assertTrue(result["structured_evidence_found"])
             self.assertEqual(result["best_evidence_type"], "manual_verified_amazon_url")
             self.assertEqual(result["best_evidence_source"], "manual_sheet_override")
+            self.assertEqual(result["best_evidence_url"], "https://www.amazon.com/stores/Brooklinen/page/123")
 
     def test_normalize_amazon_url_handles_malformed_inputs(self) -> None:
         for value in (None, [], {}, "", "[]", "{}", "[https://www.amazon.com", "{not a url}", "Tatcha"):
