@@ -13,7 +13,7 @@ from amazon_lead_agent.agents.scoring_agent import run_scoring
 from amazon_lead_agent.agents.scoring_agent import classify_scored_lead, score_lead
 from amazon_lead_agent.reporting import write_campaign_report
 from amazon_lead_agent.tools.amazon_backlink_discovery import is_valid_amazon_url
-from amazon_lead_agent.tools.amazon_evidence_verification import verify_amazon_evidence
+from amazon_lead_agent.tools.amazon_evidence_verification import STRUCTURED_EVIDENCE_TYPES, verify_amazon_evidence
 from amazon_lead_agent.tools.scrapegraph_runner import extract_brand_profile
 from amazon_lead_agent.tools.storage_router import get_storage_router
 from amazon_lead_agent.normalization import ensure_lead_identity
@@ -50,7 +50,12 @@ def _canonical_amazon_evidence_urls(lead: dict[str, Any]) -> list[str]:
         if candidate and is_valid_amazon_url(candidate) and candidate not in urls:
             urls.append(candidate)
     best_url = str(lead.get("best_evidence_url") or "").strip()
-    if best_url and is_valid_amazon_url(best_url) and best_url not in urls:
+    if (
+        best_url
+        and is_valid_amazon_url(best_url)
+        and best_url not in urls
+        and str(lead.get("best_evidence_type") or "").strip() in STRUCTURED_EVIDENCE_TYPES
+    ):
         urls.insert(0, best_url)
     return urls
 
@@ -163,11 +168,11 @@ def _write_tracer_summary(path: Path, report: dict[str, Any]) -> None:
         ]
     )
     for item in report.get("tracer_results", []):
-        evidence_urls = item.get("amazon_evidence_urls") or []
-        if not evidence_urls:
-            best_url = str(item.get("best_evidence_url") or "").strip()
-            if best_url:
-                evidence_urls = [best_url]
+        evidence_urls = [
+            str(url).strip()
+            for url in (item.get("amazon_evidence_urls") or [])
+            if str(url).strip() and is_valid_amazon_url(str(url).strip())
+        ]
         lines.append(
             f"| {item.get('brand_name', '')} | {item.get('canonical_brand_name', '') or 'none'} | {item.get('website_title', '') or 'none'} | {', '.join(evidence_urls) or 'none'} | {item.get('contact_url', '') or 'none'} | {item.get('decision_maker_name', '') or 'none'} | {item.get('draft_preview_subject', '') or 'blocked'} |",
         )
@@ -274,6 +279,10 @@ def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = Tru
                 final["review_status"] = "needs_enrichment"
                 final["send_status"] = "not_eligible"
                 final["draft_block_reason"] = "missing_structured_amazon_evidence_url" if structured_evidence and not best_evidence_valid else "missing_structured_amazon_evidence"
+                final["draft_preview_subject"] = ""
+                final["draft_preview_body"] = ""
+                final["draft_subject"] = ""
+                final["draft_body"] = ""
                 report["tracer_drafts_blocked_due_missing_evidence"] += 1
             pending_updates.append(final)
             report["llm_providers_used"].append(str(final.get("llm_provider_used") or ""))

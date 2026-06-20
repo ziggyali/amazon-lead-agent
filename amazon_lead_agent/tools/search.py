@@ -519,8 +519,21 @@ def _search_web_with_provider(query: str, limit: int = 10, provider: str | None 
 
 
 def search_web(query: str, limit: int = 10, provider: str | None = None) -> list[dict]:
-    results, _, _ = _search_web_with_provider(query, limit=limit, provider=provider)
+    results, provider_used, _ = _search_web_with_provider(query, limit=limit, provider=provider)
+    if results:
+        provider_label = provider_used or provider or _search_provider_order()[0]
+        for result in results:
+            result.setdefault("provider", provider_label)
     return results
+
+
+def search_web_with_metadata(query: str, limit: int = 10, provider: str | None = None) -> tuple[list[dict], str | None, str]:
+    results, provider_used, status = _search_web_with_provider(query, limit=limit, provider=provider)
+    if results:
+        provider_label = provider_used or provider or _search_provider_order()[0]
+        for result in results:
+            result.setdefault("provider", provider_label)
+    return results, provider_used, status
 
 
 def generate_queries(categories: list[str]) -> list[dict[str, str]]:

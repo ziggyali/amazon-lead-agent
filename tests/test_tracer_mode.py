@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from amazon_lead_agent.runtime import run_campaign
+from amazon_lead_agent.runtime import run_campaign, _write_tracer_summary
 
 
 class TracerModeTests(unittest.TestCase):
@@ -122,6 +122,42 @@ class TracerModeTests(unittest.TestCase):
         self.assertGreaterEqual(len(fake_storage.reports), 1)
         self.assertGreaterEqual(fake_storage.commits, 1)
 
+    def test_tracer_summary_never_uses_brand_name_as_evidence_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "summary.md"
+            _write_tracer_summary(
+                path,
+                {
+                    "tracer_brands_processed": 1,
+                    "tracer_brands_with_verified_amazon_evidence": 0,
+                    "tracer_brands_without_evidence": 1,
+                    "tracer_drafts_generated": 0,
+                    "tracer_drafts_blocked_due_missing_evidence": 1,
+                    "tracer_contact_paths_found": 0,
+                    "tracer_decision_makers_found": 0,
+                    "llm_providers_used": [],
+                    "errors": 0,
+                    "manual_review_table": [],
+                    "tracer_results": [
+                    {
+                        "brand_name": "Tatcha",
+                        "canonical_brand_name": "Tatcha",
+                        "website_title": "Luxury Japanese Skincare Products Tatcha",
+                        "amazon_evidence_urls": [],
+                        "best_evidence_url": "Tatcha",
+                        "contact_url": "",
+                            "decision_maker_name": "",
+                            "draft_preview_subject": "",
+                        }
+                    ],
+                },
+            )
+            text = path.read_text(encoding="utf-8")
+            row = next(line for line in text.splitlines() if line.startswith("| Tatcha | Tatcha | Luxury Japanese Skincare Products Tatcha |"))
+            cells = [cell.strip() for cell in row.strip("|").split("|")]
+            self.assertGreaterEqual(len(cells), 7)
+            self.assertEqual(cells[3], "none")
+
     @patch("amazon_lead_agent.runtime.verify_amazon_evidence")
     @patch("amazon_lead_agent.runtime.extract_brand_profile")
     @patch("amazon_lead_agent.runtime.get_storage_router")
@@ -225,6 +261,8 @@ class TracerModeTests(unittest.TestCase):
         self.assertEqual(report["tracer_drafts_generated"], 0)
         self.assertEqual(report["tracer_drafts_blocked_due_missing_evidence"], 1)
         self.assertTrue(any(lead.get("draft_block_reason") == "missing_structured_amazon_evidence_url" for _, lead in mock_get_storage_router.return_value.upserts))
+        self.assertTrue(all(not lead.get("draft_preview_subject") for _, lead in mock_get_storage_router.return_value.upserts))
+        self.assertTrue(all(not lead.get("draft_preview_body") for _, lead in mock_get_storage_router.return_value.upserts))
 
     @patch("amazon_lead_agent.runtime.verify_amazon_evidence")
     @patch("amazon_lead_agent.runtime.extract_brand_profile")
@@ -330,6 +368,8 @@ class TracerModeTests(unittest.TestCase):
         self.assertEqual(report["tracer_drafts_generated"], 0)
         self.assertEqual(report["tracer_drafts_blocked_due_missing_evidence"], 1)
         self.assertTrue(any(lead.get("draft_block_reason") == "missing_structured_amazon_evidence_url" for _, lead in fake_storage.upserts))
+        self.assertTrue(all(not lead.get("draft_preview_subject") for _, lead in fake_storage.upserts))
+        self.assertTrue(all(not lead.get("draft_preview_body") for _, lead in fake_storage.upserts))
 
 
 if __name__ == "__main__":

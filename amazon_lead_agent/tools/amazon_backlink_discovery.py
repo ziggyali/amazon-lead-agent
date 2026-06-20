@@ -91,7 +91,7 @@ def has_verified_amazon_evidence(lead: dict) -> bool:
         for item in evidence_items:
             if isinstance(item, dict):
                 evidence_type = str(item.get("evidence_type") or "").strip().lower()
-                if evidence_type in {"official_site_amazon_backlink", "amazon_storefront_search_result", "amazon_product_search_result", "amazon_brand_page_search_result", "manual_verified_amazon_url"} and is_valid_amazon_url(item.get("evidence_url")):
+                if evidence_type in {"official_site_amazon_backlink", "amazon_storefront_search_result", "amazon_product_search_result", "amazon_brand_page_search_result", "manual_verified_amazon_url", "cached_verified_amazon_url"} and is_valid_amazon_url(item.get("evidence_url")):
                     return True
     evidence_urls: list[str] = []
     for field in ("amazon_links", "amazon_links_json", "amazon_evidence_url", "amazon_evidence_urls"):
