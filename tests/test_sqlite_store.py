@@ -26,6 +26,7 @@ class SQLiteStoreTests(unittest.TestCase):
                         "company_name": "Acme Brands LLC",
                         "website": "https://example.com",
                         "category": "beauty",
+                        "status": "scored",
                         "amazon_backlink_found": True,
                         "public_emails": ["hello@example.com"],
                         "contact_page_url": "https://example.com/contact",
@@ -83,7 +84,7 @@ class SQLiteStoreTests(unittest.TestCase):
             init_db(db_path)
             conn = get_connection(db_path)
             try:
-                lead_id = upsert_lead(conn, {"company_name": "Acme", "website": "https://example.com"})
+                lead_id = upsert_lead(conn, {"company_name": "Acme", "website": "https://example.com", "status": "discovered"})
                 record_outreach_event(conn, {"lead_id": lead_id, "event_type": "draft_created", "metadata": {"x": 1}})
                 conn.commit()
                 report = conn.execute("SELECT draft_count FROM daily_reports").fetchone()

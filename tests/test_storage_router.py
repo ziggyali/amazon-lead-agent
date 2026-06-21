@@ -55,6 +55,21 @@ class StorageRouterTests(unittest.TestCase):
             self.assertEqual(router.mode, "sqlite")
             router.close()
 
+    @patch("amazon_lead_agent.tools.storage_router.SheetStore", FakeSheetStore)
+    def test_upsert_lead_rejects_missing_required_fields(self) -> None:
+        config = {
+            "storage": {
+                "storage_mode": "sheets",
+                "local_cache_enabled": False,
+                "google_sheet_id": "sheet-123",
+                "sqlite_path": "data/leads.db",
+            }
+        }
+        router = get_storage_router(config, Path("data/leads.db"))
+        with self.assertRaises(ValueError):
+            router.upsert_lead({"company_name": "Acme", "website": "https://example.com"})
+        router.close()
+
     @patch("amazon_lead_agent.tools.google_sheets.read_tab_rows", return_value=[{"id": "lead-1", "company_name": "Acme", "website": "https://example.com"}])
     @patch("amazon_lead_agent.tools.google_sheets.read_tab_headers", return_value=["id", "company_name", "website", "status", "updated_at"])
     @patch("amazon_lead_agent.tools.google_sheets.append_rows", return_value={"confirmed_rows": 1})

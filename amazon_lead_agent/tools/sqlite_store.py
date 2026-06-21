@@ -6,7 +6,7 @@ from pathlib import Path
 import json
 import sqlite3
 
-from amazon_lead_agent.normalization import ensure_lead_identity, make_lead_id, normalize_company_name, normalize_domain
+from amazon_lead_agent.normalization import make_lead_id, normalize_company_name, normalize_domain, validate_lead_identity_for_storage
 
 
 def _utc_now() -> str:
@@ -185,7 +185,9 @@ def _json_list(value: object) -> str:
 
 
 def _lead_row(lead: dict) -> dict:
-    lead = ensure_lead_identity(lead)
+    lead, missing = validate_lead_identity_for_storage(lead)
+    if missing:
+        raise ValueError(f"missing required lead fields: {', '.join(missing)}")
     website = lead.get("website") or ""
     company_name = lead.get("company_name") or lead.get("brand_name") or website
     amazon_links = lead.get("amazon_links") or []
@@ -297,6 +299,10 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
 def _select_leads(conn: sqlite3.Connection, query: str, params: tuple[object, ...]) -> list[dict]:
     rows = conn.execute(query, params).fetchall()
     return [_row_to_dict(row) for row in rows]
+
+
+def get_all_leads(conn: sqlite3.Connection) -> list[dict]:
+    return _select_leads(conn, "SELECT * FROM leads", ())
 
 
 def get_leads_for_enrichment(conn: sqlite3.Connection, limit: int) -> list[dict]:

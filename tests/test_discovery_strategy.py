@@ -85,8 +85,24 @@ class DiscoveryStrategyTests(unittest.TestCase):
         self.assertEqual(results[0]["url"], "https://www.glossier.com")
         self.assertEqual(results[0]["category"], "beauty")
         self.assertEqual(results[0]["status_hint"], "needs_enrichment")
+        self.assertEqual(results[0]["status"], "needs_enrichment")
+        self.assertTrue(results[0]["lead_id"])
+        self.assertEqual(results[0]["id"], results[0]["lead_id"])
         self.assertEqual(results[0]["source_url"], "https://www.glossier.com")
         self.assertEqual(results[0]["source_urls"], ["https://www.glossier.com"])
+        self.assertEqual(results[0]["brand_name"], "Glossier")
+        self.assertEqual(results[0]["canonical_brand_name"], "Glossier")
+        self.assertTrue(results[0]["company_name"])
+        self.assertTrue(results[0]["seed_url"])
+
+    @patch("amazon_lead_agent.tools.search._read_seed_sites", return_value=[{"kind": "direct", "url": "https://glossier.com", "label": ""}])
+    def test_direct_brand_url_seed_without_label_uses_canonical_brand_name(self, mock_seed_sites) -> None:
+        with patch.dict(os.environ, {"DISCOVERY_MODE": "seeded"}, clear=False):
+            results = discover_candidates(["beauty"], limit=5)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["canonical_brand_name"], "Glossier")
+        self.assertEqual(results[0]["brand_name"], "Glossier")
+        self.assertEqual(results[0]["company_name"], "Glossier")
 
     @patch("amazon_lead_agent.tools.search._read_seed_sites", return_value=[{"kind": "page", "url": "https://directory.example.com/beauty", "label": "Beauty Directory"}])
     @patch(

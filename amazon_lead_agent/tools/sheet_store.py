@@ -6,7 +6,7 @@ import logging
 from typing import Any
 import socket
 
-from amazon_lead_agent.normalization import ensure_lead_identity, make_lead_id
+from amazon_lead_agent.normalization import make_lead_id, validate_lead_identity_for_storage
 from amazon_lead_agent.tools import google_sheets
 
 
@@ -158,7 +158,7 @@ class SheetStore:
                 lead_id = _lead_key(row)
                 if not lead_id:
                     continue
-                merged[lead_id] = {**merged.get(lead_id, {}), **row}
+                merged[lead_id] = {**merged.get(lead_id, {}), **row, "_tab": tab}
         return list(merged.values())
 
     def get_lead(self, lead_id: str) -> dict[str, Any] | None:
@@ -173,7 +173,11 @@ class SheetStore:
 
     def upsert_lead(self, lead: dict[str, Any], tab: str = "Lead Queue") -> str:
         canonical = _canonical_tab_name(tab)
-        payload = ensure_lead_identity(lead)
+        payload, missing = validate_lead_identity_for_storage(lead)
+        if missing:
+            message = f"rejecting lead write for {canonical}: missing required fields {missing}"
+            LOGGER.warning(message)
+            raise ValueError(message)
         if not payload.get("id"):
             company_name = payload.get("company_name") or payload.get("brand_name") or payload.get("website") or ""
             website = payload.get("website") or ""

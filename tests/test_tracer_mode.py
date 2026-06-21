@@ -45,6 +45,9 @@ class TracerModeTests(unittest.TestCase):
                     },
                 ][:limit]
 
+            def get_all_leads(self):
+                return self.get_leads_for_enrichment(999)
+
             def upsert_lead(self, lead, tab=None):
                 self.upserts.append((tab, dict(lead)))
                 return lead.get("id", "lead-1")
@@ -168,6 +171,9 @@ class TracerModeTests(unittest.TestCase):
                     },
                 ][:limit]
 
+            def get_all_leads(self):
+                return self.get_leads_for_enrichment(999)
+
             def upsert_lead(self, lead, tab=None):
                 self.upserts.append((tab, dict(lead)))
                 return lead.get("id", "lead-1")
@@ -226,6 +232,78 @@ class TracerModeTests(unittest.TestCase):
         self.assertIn("Tatcha", brands_seen)
         self.assertNotIn("Brooklinen", brands_seen)
         self.assertEqual(report.get("tracer_brands_requested"), ["glossier", "tatcha"])
+
+    @patch("amazon_lead_agent.runtime.get_storage_router")
+    def test_tracer_preflight_reports_missing_fields_and_fails_fast(self, mock_get_storage_router) -> None:
+        class FakeStorage:
+            uses_sheets = True
+
+            def get_all_leads(self):
+                return [
+                    {
+                        "id": "lead-1",
+                        "lead_id": "lead-1",
+                        "brand_name": "Glossier",
+                        "website": "https://www.glossier.com",
+                        "status": "",
+                        "category": "beauty",
+                    },
+                    {
+                        "id": "lead-2",
+                        "lead_id": "lead-2",
+                        "brand_name": "",
+                        "website": "https://www.tatcha.com",
+                        "status": "needs_enrichment",
+                        "category": "beauty",
+                    },
+                    {
+                        "id": "lead-3",
+                        "lead_id": "lead-3",
+                        "brand_name": "Wild One",
+                        "website": "",
+                        "status": "needs_enrichment",
+                        "category": "pet",
+                    },
+                ]
+
+            def get_leads_for_enrichment(self, limit):
+                return []
+
+            def upsert_lead(self, lead, tab=None):
+                return lead.get("id", "")
+
+            def record_outreach_event(self, event):
+                return None
+
+            def append_daily_report(self, report):
+                return None
+
+            def commit(self):
+                return None
+
+            def close(self):
+                return None
+
+        mock_get_storage_router.return_value = FakeStorage()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cwd = Path(tmpdir)
+            old_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "missing_status=1"):
+                    run_campaign(
+                        {
+                            "storage": {"google_sheet_id": "sheet-123"},
+                            "campaign": {"minimum_score_for_draft": 75, "daily_draft_limit": 10, "daily_discovery_limit": 8, "categories": ["beauty", "pet"]},
+                            "sender": {"name": "Zaigham Ali", "offer": "Offer"},
+                            "llm": {"provider": "minimax"},
+                        },
+                        cwd / "leads.db",
+                        mode="tracer",
+                        dry_run=True,
+                    )
+            finally:
+                os.chdir(old_cwd)
 
     def test_tracer_summary_never_uses_brand_name_as_evidence_url(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -287,6 +365,9 @@ class TracerModeTests(unittest.TestCase):
                     "status": "needs_enrichment",
                     "source_urls": ["https://www.tatcha.com"],
                 }]
+
+            def get_all_leads(self):
+                return self.get_leads_for_enrichment(999)
 
             def upsert_lead(self, lead, tab=None):
                 self.upserts.append((tab, dict(lead)))
@@ -393,6 +474,9 @@ class TracerModeTests(unittest.TestCase):
                     "status": "needs_enrichment",
                     "source_urls": ["https://www.glossier.com"],
                 }]
+
+            def get_all_leads(self):
+                return self.get_leads_for_enrichment(999)
 
             def upsert_lead(self, lead, tab=None):
                 self.upserts.append((tab, dict(lead)))

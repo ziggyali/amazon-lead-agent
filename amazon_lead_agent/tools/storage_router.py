@@ -17,7 +17,7 @@ from amazon_lead_agent.tools.sqlite_store import (
     record_outreach_event,
     upsert_lead,
 )
-from amazon_lead_agent.normalization import ensure_lead_identity
+from amazon_lead_agent.normalization import validate_lead_identity_for_storage
 
 
 LOGGER = logging.getLogger(__name__)
@@ -161,8 +161,24 @@ class StorageRouter:
             return []
         return get_leads_for_drafting(self._sqlite_conn, min_score, limit)
 
+    def get_all_leads(self) -> list[dict[str, Any]]:
+        if self.uses_sheets:
+            assert self._sheet_store is not None
+            return self._sheet_store.get_all_leads()
+        if not self._sqlite_conn:
+            return []
+        cursor = self._sqlite_conn.execute("SELECT * FROM leads")
+        rows = cursor.fetchall()
+        from amazon_lead_agent.tools.sqlite_store import _row_to_dict  # local import to avoid cycle
+
+        return [_row_to_dict(row) for row in rows]
+
     def upsert_lead(self, lead: dict[str, Any], tab: str | None = None) -> str:
-        lead = ensure_lead_identity(lead)
+        lead, missing = validate_lead_identity_for_storage(lead)
+        if missing:
+            message = f"rejecting lead write: missing required fields {missing}"
+            LOGGER.warning(message)
+            raise ValueError(message)
         stage_tab = tab or self._stage_tab(lead)
         lead_id = str(lead.get("id") or "")
         if self.uses_sheets:

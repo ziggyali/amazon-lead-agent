@@ -16,7 +16,7 @@ from amazon_lead_agent.tools.amazon_backlink_discovery import is_valid_amazon_ur
 from amazon_lead_agent.tools.amazon_evidence_verification import STRUCTURED_EVIDENCE_TYPES, verify_amazon_evidence
 from amazon_lead_agent.tools.scrapegraph_runner import extract_brand_profile
 from amazon_lead_agent.tools.storage_router import get_storage_router
-from amazon_lead_agent.normalization import ensure_lead_identity, normalize_company_name
+from amazon_lead_agent.normalization import ensure_lead_identity, infer_brand_name_from_domain, normalize_company_name
 
 
 LOGGER = logging.getLogger(__name__)
@@ -50,6 +50,25 @@ def _normalize_brand_targets(brands: Any) -> list[str]:
         if key and key not in normalized:
             normalized.append(key)
     return normalized
+
+
+def _lead_brand_target_key(lead: dict[str, Any]) -> str:
+    website = str(lead.get("website") or "").strip()
+    if website:
+        inferred = normalize_company_name(infer_brand_name_from_domain(website))
+        if inferred:
+            return inferred
+    candidates = [
+        lead.get("canonical_brand_name"),
+        lead.get("seed_label"),
+        lead.get("brand_name"),
+        lead.get("company_name"),
+    ]
+    for candidate in candidates:
+        normalized = normalize_company_name(candidate)
+        if normalized:
+            return normalized
+    return ""
 
 
 def _safe_commit(storage: Any, report: dict[str, Any], *, label: str) -> str:
@@ -154,6 +173,49 @@ def _append_text_log(path: Path, message: str) -> None:
         handle.write(f"[{timestamp}] {message}\n")
 
 
+def _tracer_preflight(storage: Any, brands: Any = None) -> tuple[dict[str, int], list[dict[str, Any]]]:
+    requested = set(_normalize_brand_targets(brands))
+    leads = []
+    if hasattr(storage, "get_all_leads"):
+        try:
+            leads = list(storage.get_all_leads())
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"tracer preflight could not read Lead Queue rows: {exc}") from exc
+    counts = {
+        "tracer_preflight_total_rows": len(leads),
+        "tracer_preflight_eligible_count": 0,
+        "tracer_preflight_missing_status_count": 0,
+        "tracer_preflight_missing_brand_name_count": 0,
+        "tracer_preflight_missing_website_count": 0,
+        "tracer_preflight_brand_filtered_count": 0,
+    }
+    eligible: list[dict[str, Any]] = []
+    for lead in leads:
+        brand_key = _lead_brand_target_key(lead)
+        if requested and brand_key not in requested:
+            counts["tracer_preflight_brand_filtered_count"] += 1
+            continue
+        status = str(lead.get("status") or "").strip()
+        brand_name = str(lead.get("canonical_brand_name") or lead.get("brand_name") or lead.get("company_name") or "").strip()
+        website = str(lead.get("website") or "").strip()
+        missing = False
+        if not status:
+            counts["tracer_preflight_missing_status_count"] += 1
+            missing = True
+        if not brand_name:
+            counts["tracer_preflight_missing_brand_name_count"] += 1
+            missing = True
+        if not website:
+            counts["tracer_preflight_missing_website_count"] += 1
+            missing = True
+        if missing:
+            continue
+        if status.lower() in {"new", "discovered", "needs_enrichment", "extraction_error"}:
+            eligible.append(lead)
+    counts["tracer_preflight_eligible_count"] = len(eligible)
+    return counts, eligible
+
+
 def _write_tracer_summary(path: Path, report: dict[str, Any]) -> None:
     lines = [
         "# Tracer Bullet Summary",
@@ -212,6 +274,12 @@ def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = Tru
         "tracer_brands_processed": 0,
         "tracer_brands_with_verified_amazon_evidence": 0,
         "tracer_brands_without_evidence": 0,
+        "tracer_preflight_total_rows": 0,
+        "tracer_preflight_eligible_count": 0,
+        "tracer_preflight_missing_status_count": 0,
+        "tracer_preflight_missing_brand_name_count": 0,
+        "tracer_preflight_missing_website_count": 0,
+        "tracer_preflight_brand_filtered_count": 0,
         "tracer_contact_paths_found": 0,
         "tracer_decision_makers_found": 0,
         "tracer_drafts_generated": 0,
@@ -235,20 +303,26 @@ def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = Tru
     pending_updates: list[dict[str, Any]] = []
     try:
         _append_text_log(tracer_log, f"tracer run started dry_run={dry_run}")
-        candidates = storage.get_leads_for_enrichment(8)
-        requested_brands = set(report["tracer_brands_requested"])
-        if requested_brands:
-            candidates = [
-                lead
-                for lead in candidates
-                if normalize_company_name(
-                    lead.get("canonical_brand_name")
-                    or lead.get("seed_label")
-                    or lead.get("brand_name")
-                    or lead.get("company_name")
-                    or "",
-                ) in requested_brands
-            ]
+        preflight_counts, candidates = _tracer_preflight(storage, brands=brands)
+        report.update(preflight_counts)
+        _append_text_log(
+            tracer_log,
+            "tracer preflight total={tracer_preflight_total_rows} eligible={tracer_preflight_eligible_count} missing_status={tracer_preflight_missing_status_count} missing_brand={tracer_preflight_missing_brand_name_count} missing_website={tracer_preflight_missing_website_count} filtered={tracer_preflight_brand_filtered_count}".format(
+                **report,
+            ),
+        )
+        if not candidates:
+            report["errors"] += 1
+            report["storage_flush_status"] = "skipped_preflight_no_candidates"
+            _write_tracer_summary(tracer_summary, report)
+            write_campaign_report(db_path, summary=report)
+            raise RuntimeError(
+                "tracer preflight found no eligible Lead Queue rows; "
+                f"missing_status={report['tracer_preflight_missing_status_count']} "
+                f"missing_brand_name={report['tracer_preflight_missing_brand_name_count']} "
+                f"missing_website={report['tracer_preflight_missing_website_count']} "
+                f"brand_filtered={report['tracer_preflight_brand_filtered_count']}",
+            )
         for lead in candidates[:8]:
             lead = ensure_lead_identity(lead)
             report["brands_processed"] += 1
@@ -402,7 +476,12 @@ def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = Tru
                     "rejected_evidence_results": verification.get("rejected_evidence_results", []),
                 }
             )
-            storage.upsert_lead(final, tab="Lead Queue")
+            try:
+                storage.upsert_lead(final, tab="Lead Queue")
+            except ValueError as exc:
+                report["errors"] += 1
+                _append_text_log(tracer_log, f"tracer storage validation rejected lead_id={final.get('lead_id', '')} brand={final.get('canonical_brand_name', '')} error={exc}")
+                continue
             storage.record_outreach_event(
                 {
                     "lead_id": final["lead_id"],

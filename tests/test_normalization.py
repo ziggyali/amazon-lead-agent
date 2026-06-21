@@ -18,6 +18,7 @@ class NormalizationTests(unittest.TestCase):
     def test_infer_brand_name_from_domain(self) -> None:
         self.assertEqual(infer_brand_name_from_domain("thehonestkitchen.com"), "The Honest Kitchen")
         self.assertEqual(infer_brand_name_from_domain("glossier.com"), "Glossier")
+        self.assertEqual(infer_brand_name_from_domain("glossier com"), "Glossier")
 
     def test_deterministic_lead_id_uses_domain_and_category(self) -> None:
         lead_a = make_deterministic_lead_id("glossier.com", "beauty")
@@ -51,6 +52,12 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(lead["company_name"], "Tatcha")
         self.assertEqual(lead["brand_name"], "Tatcha")
         self.assertEqual(lead["website_title"], "Luxury Japanese Skincare Products")
+
+    def test_domainish_brand_label_is_repaired_to_canonical_name(self) -> None:
+        lead = ensure_lead_identity({"brand_name": "glossier com", "company_name": "glossier com", "website": "https://www.glossier.com", "status": "needs_enrichment"})
+        self.assertEqual(lead["canonical_brand_name"], "Glossier")
+        self.assertEqual(lead["brand_name"], "Glossier")
+        self.assertEqual(lead["company_name"], "Glossier")
 
 
 if __name__ == "__main__":

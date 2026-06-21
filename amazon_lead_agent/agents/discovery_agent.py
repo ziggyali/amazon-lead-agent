@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import logging
 from urllib.parse import urlparse
 
 from amazon_lead_agent.lead_filters import is_junk_company_name, is_blocked_domain, is_tracking_or_search_domain, is_likely_brand_domain, is_soft_brand_candidate
@@ -9,6 +10,8 @@ from amazon_lead_agent.tools.amazon_backlink_discovery import contains_amazon_bu
 from amazon_lead_agent.tools.search import discover_candidates, get_last_search_stats
 from amazon_lead_agent.tools.storage_router import StorageRouter, get_storage_router
 
+
+LOGGER = logging.getLogger(__name__)
 
 def _candidate_from_result(result: dict[str, str], category: str) -> dict[str, object]:
     title = result.get("title") or ""
@@ -102,7 +105,12 @@ def run_discovery(config: dict, db_path: Path | StorageRouter) -> dict:
             if category:
                 category_counts = local_stats["discovered_count_by_category"]
                 category_counts[category] = int(category_counts.get(category, 0)) + 1
-            lead_id = storage.upsert_lead(lead, tab="Lead Queue")
+            try:
+                lead_id = storage.upsert_lead(lead, tab="Lead Queue")
+            except ValueError as exc:
+                LOGGER.warning("discovery storage validation rejected lead=%s error=%s", lead.get("website"), exc)
+                local_stats["seed_candidates_rejected"] = local_stats.get("seed_candidates_rejected", 0) + 1
+                continue
             storage.record_outreach_event(
                 {
                     "lead_id": lead_id,

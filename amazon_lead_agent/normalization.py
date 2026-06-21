@@ -80,6 +80,8 @@ def infer_brand_name_from_domain(value: str | None) -> str:
     domain = normalize_domain(value)
     if not domain:
         return ""
+    if " " in domain and "." not in domain:
+        domain = domain.replace(" ", ".")
     if domain in SEED_BRAND_ALIASES:
         return SEED_BRAND_ALIASES[domain]
     root = domain.split(".")[0]
@@ -106,6 +108,17 @@ def _looks_like_generic_page_title(value: str | None) -> bool:
     return False
 
 
+def _looks_like_domainish_label(value: str | None) -> bool:
+    text = normalize_text(value)
+    if not text:
+        return False
+    if "://" in text:
+        return True
+    if "." in text:
+        return True
+    return bool(re.search(r"\b(com|net|org|co|io|app|shop|site)\b", text) and " " in text)
+
+
 def resolve_canonical_brand_name(payload: dict) -> str:
     seed_label = str(payload.get("seed_label") or payload.get("canonical_brand_name") or "").strip()
     if seed_label:
@@ -117,7 +130,7 @@ def resolve_canonical_brand_name(payload: dict) -> str:
     domain = normalize_domain(website)
     inferred_name = infer_brand_name_from_domain(domain or website_title or website or company_name or brand_name)
     for candidate in (brand_name, company_name):
-        if candidate and not _looks_like_generic_page_title(candidate):
+        if candidate and not _looks_like_generic_page_title(candidate) and not _looks_like_domainish_label(candidate):
             return candidate
     if inferred_name:
         return inferred_name
@@ -139,13 +152,14 @@ def ensure_lead_identity(lead: dict) -> dict:
         website = str(source_urls[0] or "").strip()
     domain = normalize_domain(website or payload.get("normalized_domain") or payload.get("lead_domain") or "")
     category = str(payload.get("category") or "").strip()
+    company_name = str(payload.get("company_name") or payload.get("brand_name") or website or "").strip()
     canonical_brand_name = resolve_canonical_brand_name(payload)
     inferred_name = infer_brand_name_from_domain(domain or website or canonical_brand_name)
     if canonical_brand_name:
         payload["canonical_brand_name"] = canonical_brand_name
-    if not payload.get("brand_name") or _looks_like_generic_page_title(payload.get("brand_name")):
+    if not payload.get("brand_name") or _looks_like_generic_page_title(payload.get("brand_name")) or _looks_like_domainish_label(payload.get("brand_name")):
         payload["brand_name"] = canonical_brand_name or inferred_name or payload.get("brand_name") or ""
-    if not payload.get("company_name") or _looks_like_generic_page_title(payload.get("company_name")) or normalize_company_name(payload.get("company_name")) in {"", normalize_company_name(domain)}:
+    if not payload.get("company_name") or _looks_like_generic_page_title(payload.get("company_name")) or _looks_like_domainish_label(payload.get("company_name")) or normalize_company_name(payload.get("company_name")) in {"", normalize_company_name(domain)}:
         payload["company_name"] = canonical_brand_name or inferred_name or payload.get("company_name") or ""
     if not payload.get("normalized_company_name"):
         payload["normalized_company_name"] = normalize_company_name(payload.get("company_name"))
@@ -165,6 +179,15 @@ def ensure_lead_identity(lead: dict) -> dict:
     if not payload.get("canonical_brand_name"):
         payload["canonical_brand_name"] = payload["brand_name"]
     return payload
+
+
+def validate_lead_identity_for_storage(lead: dict) -> tuple[dict, list[str]]:
+    payload = ensure_lead_identity(lead)
+    missing: list[str] = []
+    for field in ("lead_id", "brand_name", "website", "status"):
+        if not str(payload.get(field) or "").strip():
+            missing.append(field)
+    return payload, missing
 
 
 def make_lead_id(company_name: str | None, website: str | None, amazon_link: str | None = None) -> str:

@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse, urlun
 
 import requests
 
-from amazon_lead_agent.normalization import normalize_company_name, normalize_domain
+from amazon_lead_agent.normalization import infer_brand_name_from_domain, make_lead_id, normalize_company_name, normalize_domain
 from amazon_lead_agent.lead_filters import (
     BLOCKED_DOMAIN_KEYWORDS,
     BLOCKED_ROOT_DOMAINS,
@@ -687,15 +687,26 @@ def _unique_nonempty(values: list[str]) -> list[str]:
 
 def _brand_candidate_from_url(url: str, title: str, snippet: str, category: str, source_url: str, raw_url: str | None = None) -> dict[str, str]:
     cleaned_url = clean_search_result_url(url)
+    inferred_brand = infer_brand_name_from_domain(cleaned_url or url)
+    brand_label = title.strip() if title and not is_junk_company_name(title) else inferred_brand
     return {
+        "id": make_lead_id(brand_label or title or inferred_brand or cleaned_url or url, cleaned_url or url, source_url or raw_url or url),
+        "lead_id": make_lead_id(brand_label or title or inferred_brand or cleaned_url or url, cleaned_url or url, source_url or raw_url or url),
         "url": cleaned_url or url,
         "raw_url": raw_url or source_url or url,
         "source_url": source_url or raw_url or url,
         "source_urls": _unique_nonempty([source_url or raw_url or url, cleaned_url or url]),
-        "title": title,
+        "label": brand_label or title or "",
+        "seed_label": brand_label or title or "",
+        "title": title or brand_label,
         "snippet": snippet,
         "category": category,
         "extracted_brand_domain": cleaned_url or url,
+        "company_name": brand_label or inferred_brand or cleaned_url or url,
+        "brand_name": brand_label or inferred_brand or cleaned_url or url,
+        "canonical_brand_name": brand_label or inferred_brand or cleaned_url or url,
+        "status": "needs_enrichment",
+        "status_hint": "needs_enrichment",
     }
 
 
@@ -703,20 +714,27 @@ def _direct_seed_candidate(seed_url: str, label: str, category: str) -> dict[str
     cleaned_url = clean_search_result_url(seed_url)
     brand_url = cleaned_url or seed_url
     domain = normalize_domain(brand_url)
-    company_name = normalize_company_name(label or domain or brand_url)
+    inferred_brand = infer_brand_name_from_domain(domain or brand_url)
+    company_name = label.strip() if label and not is_junk_company_name(label) else inferred_brand or label.strip() or domain or brand_url
     return {
+        "id": make_lead_id(company_name, brand_url, seed_url),
+        "lead_id": make_lead_id(company_name, brand_url, seed_url),
         "url": brand_url,
         "raw_url": seed_url,
         "source_url": seed_url,
         "source_urls": _unique_nonempty([seed_url, brand_url]),
+        "label": label or company_name or "",
+        "seed_label": label or company_name or "",
         "title": label or company_name or domain or brand_url,
         "snippet": "",
         "category": category,
         "company_name": company_name,
         "brand_name": company_name,
+        "canonical_brand_name": company_name,
         "normalized_company_name": normalize_company_name(company_name),
         "extracted_brand_domain": brand_url,
         "status_hint": "needs_enrichment",
+        "status": "needs_enrichment",
         "seed_url": seed_url,
     }
 
