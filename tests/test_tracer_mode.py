@@ -233,6 +233,161 @@ class TracerModeTests(unittest.TestCase):
         self.assertNotIn("Brooklinen", brands_seen)
         self.assertEqual(report.get("tracer_brands_requested"), ["glossier", "tatcha"])
 
+    @patch("amazon_lead_agent.runtime.verify_amazon_evidence")
+    @patch("amazon_lead_agent.runtime.extract_brand_profile")
+    @patch("amazon_lead_agent.runtime.get_storage_router")
+    def test_tracer_brands_exact_match_collapses_duplicates_and_skips_junk(self, mock_get_storage_router, mock_extract_brand_profile, mock_verify_amazon_evidence) -> None:
+        class FakeStorage:
+            uses_sheets = True
+
+            def __init__(self):
+                self.upserts = []
+                self.events = []
+                self.reports = []
+                self.commits = 0
+
+            def get_all_leads(self):
+                return [
+                    {
+                        "id": "lead-1",
+                        "lead_id": "lead-1",
+                        "company_name": "glossier com",
+                        "brand_name": "glossier com",
+                        "canonical_brand_name": "",
+                        "website": "https://www.glossier.com",
+                        "category": "beauty",
+                        "status": "needs_enrichment",
+                        "updated_at": "2026-06-01T00:00:00Z",
+                    },
+                    {
+                        "id": "lead-2",
+                        "lead_id": "lead-2",
+                        "company_name": "Glossier",
+                        "brand_name": "Glossier",
+                        "canonical_brand_name": "Glossier",
+                        "website": "https://www.glossier.com",
+                        "category": "beauty",
+                        "status": "needs_enrichment",
+                        "manual_amazon_evidence_url": "https://www.amazon.com/stores/node/10525420011",
+                        "updated_at": "2026-06-02T00:00:00Z",
+                    },
+                    {
+                        "id": "lead-3",
+                        "lead_id": "lead-3",
+                        "company_name": "TestBrand",
+                        "brand_name": "TestBrand",
+                        "canonical_brand_name": "TestBrand",
+                        "website": "https://example.com",
+                        "category": "beauty",
+                        "status": "needs_enrichment",
+                    },
+                    {
+                        "id": "lead-4",
+                        "lead_id": "lead-4",
+                        "company_name": "Tatcha",
+                        "brand_name": "Tatcha",
+                        "canonical_brand_name": "Tatcha",
+                        "website": "https://www.tatcha.com",
+                        "category": "beauty",
+                        "status": "needs_enrichment",
+                    },
+                ]
+
+            def get_leads_for_enrichment(self, limit):
+                return self.get_all_leads()[:limit]
+
+            def upsert_lead(self, lead, tab=None):
+                self.upserts.append((tab, dict(lead)))
+                return lead.get("id", "lead-1")
+
+            def record_outreach_event(self, event):
+                self.events.append(dict(event))
+
+            def append_daily_report(self, report):
+                self.reports.append(dict(report))
+
+            def commit(self):
+                self.commits += 1
+
+            def close(self):
+                return None
+
+        def fake_extract_brand_profile(url, minimax_api_key=None, llm_config=None):
+            brand = "Glossier" if "glossier" in url else "Tatcha"
+            return {
+                "company_name": brand,
+                "brand_name": brand,
+                "website": url,
+                "category": "beauty",
+                "public_emails": ["hello@example.com"],
+                "contact_page_url": f"{url}/contact",
+                "source_urls": [url],
+                "confidence": 0.9,
+                "extraction_method": "heuristic_fallback",
+            }
+
+        def fake_verify_amazon_evidence(lead):
+            brand = lead.get("canonical_brand_name") or lead.get("brand_name")
+            if brand == "Glossier":
+                url = "https://www.amazon.com/stores/node/10525420011"
+            else:
+                url = "https://www.amazon.com/stores/node/tatcha"
+            return {
+                "canonical_brand_name": brand,
+                "website_title": lead.get("website_title", ""),
+                "structured_evidence_found": True,
+                "weak_text_signal_found": False,
+                "best_evidence_url": url,
+                "best_evidence_title": f"{brand} Store",
+                "best_evidence_snippet": f"Visit the {brand} Store",
+                "best_evidence_source": "search_index",
+                "best_evidence_confidence": "high",
+                "best_evidence_type": "amazon_storefront_search_result",
+                "best_evidence_reason": "matched storefront",
+                "amazon_evidence_items": [],
+                "amazon_evidence_urls": [url],
+                "amazon_backlink_found": True,
+                "amazon_evidence_summary": "Official website links to Amazon.",
+                "amazon_queries_run": [],
+                "amazon_search_results_seen": 0,
+                "amazon_results_rejected_count": 0,
+                "amazon_results_rejected_reasons": [],
+                "search_stats": {},
+            }
+
+        mock_get_storage_router.return_value = FakeStorage()
+        mock_extract_brand_profile.side_effect = fake_extract_brand_profile
+        mock_verify_amazon_evidence.side_effect = fake_verify_amazon_evidence
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cwd = Path(tmpdir)
+            old_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                report = run_campaign(
+                    {
+                        "storage": {"google_sheet_id": "sheet-123"},
+                        "campaign": {"minimum_score_for_draft": 75, "daily_draft_limit": 10, "daily_discovery_limit": 8, "categories": ["beauty"]},
+                        "sender": {"name": "Zaigham Ali", "offer": "Offer"},
+                        "llm": {"provider": "minimax"},
+                    },
+                    cwd / "leads.db",
+                    mode="tracer",
+                    dry_run=True,
+                    brands="Glossier,Tatcha",
+                )
+            finally:
+                os.chdir(old_cwd)
+
+        upserted_brands = [lead.get("canonical_brand_name") or lead.get("brand_name") for _, lead in mock_get_storage_router.return_value.upserts]
+        self.assertEqual(sorted(set(upserted_brands)), ["Glossier", "Tatcha"])
+        self.assertEqual(report["tracer_brands_processed"], 2)
+        self.assertEqual(report["tracer_drafts_generated"], 2)
+        self.assertGreaterEqual(report["tracer_preflight_duplicate_rows_skipped"], 1)
+        self.assertGreaterEqual(report["tracer_preflight_junk_rows_skipped"], 1)
+        self.assertEqual(report["tracer_preflight_final_brands_to_process"], ["glossier", "tatcha"])
+        self.assertEqual(report["tracer_preflight_selected_rows_by_brand"]["glossier"], ["lead-2"])
+
     @patch("amazon_lead_agent.runtime.get_storage_router")
     def test_tracer_preflight_reports_missing_fields_and_fails_fast(self, mock_get_storage_router) -> None:
         class FakeStorage:

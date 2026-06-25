@@ -62,6 +62,17 @@ class SheetStore:
 
     def warm_tabs(self, tabs: list[str] | tuple[str, ...] | None = None) -> None:
         for tab in tabs or (*LEAD_TABS, *REPORT_TABS):
+            if tab == "Lead Queue" and self.sheet_id:
+                try:
+                    self._lead_queue_headers = google_sheets.ensure_tab_headers(
+                        self.sheet_id,
+                        "Lead Queue",
+                        google_sheets.LEAD_QUEUE_REQUIRED_HEADERS,
+                        auth_mode=self.auth_mode,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self.dedupe_cache_unavailable = True
+                    LOGGER.info("lead queue header repair skipped: %s", exc)
             self.read_tab(tab, refresh=True)
 
     def read_tab(self, tab: str, refresh: bool = False) -> list[dict[str, Any]]:
@@ -82,7 +93,12 @@ class SheetStore:
         self._lead_cache_loaded = True
         before_stats = google_sheets.get_io_stats()
         try:
-            headers = google_sheets.read_tab_headers(self.sheet_id, "Lead Queue")
+            headers = google_sheets.ensure_tab_headers(
+                self.sheet_id,
+                "Lead Queue",
+                google_sheets.LEAD_QUEUE_REQUIRED_HEADERS,
+                auth_mode=self.auth_mode,
+            )
         except Exception:  # noqa: BLE001
             self.dedupe_cache_unavailable = True
             self._lead_cache_available = False
@@ -345,7 +361,10 @@ class SheetStore:
                     flush_failed_count = len(lead_queue_rows) - confirmed
                     flush_failed = True
                 try:
+                    before_verification_stats = google_sheets.get_io_stats()
                     verification_rows = google_sheets.read_tab_rows(self.sheet_id, "Lead Queue", auth_mode=self.auth_mode)
+                    after_verification_stats = google_sheets.get_io_stats()
+                    verification_errors = len(after_verification_stats.get("failed_sheet_reads", [])) - len(before_verification_stats.get("failed_sheet_reads", []))
                     queued_ids = {_lead_key(row) for row in lead_queue_rows if _lead_key(row)}
                     queued_domains = {_lead_domain(row) for row in lead_queue_rows if _lead_domain(row)}
                     verified = 0
@@ -356,8 +375,11 @@ class SheetStore:
                             verified += 1
                     flush_verified = verified
                     flush_missing = max(0, confirmed - verified)
-                    flush_verified_status = "confirmed" if flush_missing == 0 else "failed"
-                    if flush_missing > 0:
+                    if (verification_errors > 0 or (self.dedupe_cache_unavailable and not verification_rows)) and verified == 0:
+                        flush_verified_status = "skipped_due_to_read_error"
+                    else:
+                        flush_verified_status = "confirmed" if flush_missing == 0 else "failed"
+                    if flush_missing > 0 and flush_verified_status != "skipped_due_to_read_error":
                         flush_failed = True
                 except Exception as exc:  # noqa: BLE001
                     flush_verified_status = "skipped_due_to_read_error"

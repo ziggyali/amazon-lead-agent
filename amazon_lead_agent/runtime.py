@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import logging
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from amazon_lead_agent.agents.outreach_agent import run_outreach
 from amazon_lead_agent.agents.scoring_agent import run_scoring
 from amazon_lead_agent.agents.scoring_agent import classify_scored_lead, score_lead
 from amazon_lead_agent.reporting import write_campaign_report
+from amazon_lead_agent.lead_filters import is_junk_company_name
 from amazon_lead_agent.tools.amazon_backlink_discovery import is_valid_amazon_url
 from amazon_lead_agent.tools.amazon_evidence_verification import STRUCTURED_EVIDENCE_TYPES, verify_amazon_evidence
 from amazon_lead_agent.tools.scrapegraph_runner import extract_brand_profile
@@ -31,6 +33,26 @@ def _storage_mode_label(storage: Any) -> str:
     if bool(getattr(storage, "uses_sqlite", False)):
         return "sqlite"
     return ""
+
+
+def _looks_like_domainish_brand_label(value: Any) -> bool:
+    text = re.sub(r"\s+", " ", str(value or "").strip().lower())
+    if not text:
+        return False
+    if "://" in text or "." in text:
+        return True
+    return bool(re.search(r"\b(com|net|org|co|io|app|shop|site|store)\b", text) and " " in text)
+
+
+def _looks_like_stale_junk_brand(value: Any) -> bool:
+    text = re.sub(r"\s+", " ", str(value or "").strip().lower())
+    if not text:
+        return False
+    if "testbrand" in text:
+        return True
+    if text == "available" or text.startswith("available "):
+        return True
+    return is_junk_company_name(text)
 
 
 def _normalize_brand_targets(brands: Any) -> list[str]:
@@ -53,11 +75,6 @@ def _normalize_brand_targets(brands: Any) -> list[str]:
 
 
 def _lead_brand_target_key(lead: dict[str, Any]) -> str:
-    website = str(lead.get("website") or "").strip()
-    if website:
-        inferred = normalize_company_name(infer_brand_name_from_domain(website))
-        if inferred:
-            return inferred
     candidates = [
         lead.get("canonical_brand_name"),
         lead.get("seed_label"),
@@ -66,8 +83,73 @@ def _lead_brand_target_key(lead: dict[str, Any]) -> str:
     ]
     for candidate in candidates:
         normalized = normalize_company_name(candidate)
-        if normalized:
+        if normalized and not is_junk_company_name(candidate) and not _looks_like_domainish_brand_label(candidate):
             return normalized
+    website = str(lead.get("website") or "").strip()
+    if website:
+        inferred = normalize_company_name(infer_brand_name_from_domain(website))
+        if inferred and not is_junk_company_name(inferred):
+            return inferred
+    return ""
+
+
+def _lead_brand_normalized_values(lead: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for candidate in (
+        lead.get("canonical_brand_name"),
+        lead.get("seed_label"),
+        lead.get("brand_name"),
+        lead.get("company_name"),
+    ):
+        normalized = normalize_company_name(candidate)
+        if normalized and not is_junk_company_name(candidate) and not _looks_like_domainish_brand_label(candidate) and normalized not in values:
+            values.append(normalized)
+    website = str(lead.get("website") or "").strip()
+    if website:
+        inferred = normalize_company_name(infer_brand_name_from_domain(website))
+        if inferred and not is_junk_company_name(inferred) and inferred not in values:
+            values.append(inferred)
+    return values
+
+
+def _lead_brand_display_name(lead: dict[str, Any]) -> str:
+    for candidate in (
+        lead.get("canonical_brand_name"),
+        lead.get("seed_label"),
+        lead.get("brand_name"),
+        lead.get("company_name"),
+    ):
+        text = str(candidate or "").strip()
+        if text and not is_junk_company_name(text) and not _looks_like_domainish_brand_label(text):
+            return text
+    website = str(lead.get("website") or "").strip()
+    if website:
+        inferred = infer_brand_name_from_domain(website)
+        if inferred and not is_junk_company_name(inferred):
+            return inferred
+    return ""
+
+
+def _tracer_row_priority(lead: dict[str, Any]) -> tuple[int, int, int, int, int, str]:
+    manual = 1 if str(lead.get("manual_amazon_evidence_url") or "").strip() else 0
+    cached = 1 if str(lead.get("best_evidence_url") or "").strip() else 0
+    status = str(lead.get("status") or "").strip().lower()
+    needs = 1 if status == "needs_enrichment" else 0
+    website = 1 if str(lead.get("website") or "").strip() else 0
+    completeness = sum(1 for field in ("lead_id", "brand_name", "canonical_brand_name", "website", "category", "status") if str(lead.get(field) or "").strip())
+    updated_at = str(lead.get("updated_at") or lead.get("created_at") or "")
+    return (manual, cached, needs, website, completeness, updated_at)
+
+
+def _tracer_dedupe_key(lead: dict[str, Any]) -> str:
+    brand_key = _lead_brand_target_key(lead)
+    if brand_key:
+        return brand_key
+    website = str(lead.get("website") or "").strip()
+    if website:
+        inferred = normalize_company_name(infer_brand_name_from_domain(website))
+        if inferred:
+            return inferred
     return ""
 
 
@@ -173,8 +255,9 @@ def _append_text_log(path: Path, message: str) -> None:
         handle.write(f"[{timestamp}] {message}\n")
 
 
-def _tracer_preflight(storage: Any, brands: Any = None) -> tuple[dict[str, int], list[dict[str, Any]]]:
-    requested = set(_normalize_brand_targets(brands))
+def _tracer_preflight(storage: Any, brands: Any = None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    requested = _normalize_brand_targets(brands)
+    requested_set = set(requested)
     leads = []
     if hasattr(storage, "get_all_leads"):
         try:
@@ -188,32 +271,70 @@ def _tracer_preflight(storage: Any, brands: Any = None) -> tuple[dict[str, int],
         "tracer_preflight_missing_brand_name_count": 0,
         "tracer_preflight_missing_website_count": 0,
         "tracer_preflight_brand_filtered_count": 0,
+        "tracer_preflight_duplicate_rows_skipped": 0,
+        "tracer_preflight_junk_rows_skipped": 0,
+        "tracer_preflight_missing_required_fields_by_row": [],
+        "tracer_preflight_matching_rows_by_brand": {},
+        "tracer_preflight_selected_rows_by_brand": {},
+        "tracer_preflight_final_brands_to_process": [],
     }
-    eligible: list[dict[str, Any]] = []
+    matching: dict[str, list[dict[str, Any]]] = {}
+    missing_required_fields_by_row: list[dict[str, Any]] = []
     for lead in leads:
+        junk_values = [
+            value
+            for value in (lead.get("brand_name"), lead.get("canonical_brand_name"), lead.get("company_name"), lead.get("seed_label"))
+            if str(value or "").strip()
+        ]
+        if any(_looks_like_stale_junk_brand(value) for value in junk_values):
+            counts["tracer_preflight_junk_rows_skipped"] += 1
+            continue
+        display_name = _lead_brand_display_name(lead)
         brand_key = _lead_brand_target_key(lead)
-        if requested and brand_key not in requested:
+        if requested_set and brand_key not in requested_set:
             counts["tracer_preflight_brand_filtered_count"] += 1
             continue
         status = str(lead.get("status") or "").strip()
         brand_name = str(lead.get("canonical_brand_name") or lead.get("brand_name") or lead.get("company_name") or "").strip()
         website = str(lead.get("website") or "").strip()
-        missing = False
-        if not status:
-            counts["tracer_preflight_missing_status_count"] += 1
-            missing = True
-        if not brand_name:
-            counts["tracer_preflight_missing_brand_name_count"] += 1
-            missing = True
-        if not website:
-            counts["tracer_preflight_missing_website_count"] += 1
-            missing = True
-        if missing:
+        missing_fields = [field for field, value in (("status", status), ("brand_name", brand_name), ("website", website)) if not value]
+        if missing_fields:
+            row_issue = {
+                "lead_id": lead.get("lead_id") or lead.get("id") or "",
+                "canonical_brand_name": display_name or brand_name,
+                "missing_fields": missing_fields,
+            }
+            missing_required_fields_by_row.append(row_issue)
+            if "status" in missing_fields:
+                counts["tracer_preflight_missing_status_count"] += 1
+            if "brand_name" in missing_fields:
+                counts["tracer_preflight_missing_brand_name_count"] += 1
+            if "website" in missing_fields:
+                counts["tracer_preflight_missing_website_count"] += 1
             continue
-        if status.lower() in {"new", "discovered", "needs_enrichment", "extraction_error"}:
-            eligible.append(lead)
-    counts["tracer_preflight_eligible_count"] = len(eligible)
-    return counts, eligible
+        if status.lower() not in {"new", "discovered", "needs_enrichment", "extraction_error"}:
+            continue
+        final_brand = brand_key or normalize_company_name(display_name or brand_name)
+        if not final_brand:
+            counts["tracer_preflight_junk_rows_skipped"] += 1
+            continue
+        matching.setdefault(final_brand, []).append(lead)
+    selected: list[dict[str, Any]] = []
+    selected_by_brand: dict[str, list[str]] = {}
+    matching_by_brand: dict[str, list[str]] = {brand: [str(row.get("lead_id") or row.get("id") or "") for row in rows] for brand, rows in matching.items()}
+    for brand, rows in matching.items():
+        active = list(rows)
+        active.sort(key=_tracer_row_priority, reverse=True)
+        if active:
+            selected.append(active[0])
+            selected_by_brand[brand] = [str(active[0].get("lead_id") or active[0].get("id") or "")]
+            counts["tracer_preflight_duplicate_rows_skipped"] += max(0, len(active) - 1)
+    counts["tracer_preflight_eligible_count"] = len(selected)
+    counts["tracer_preflight_missing_required_fields_by_row"] = missing_required_fields_by_row
+    counts["tracer_preflight_matching_rows_by_brand"] = matching_by_brand
+    counts["tracer_preflight_selected_rows_by_brand"] = selected_by_brand
+    counts["tracer_preflight_final_brands_to_process"] = list(selected_by_brand.keys())
+    return counts, selected
 
 
 def _write_tracer_summary(path: Path, report: dict[str, Any]) -> None:
@@ -254,6 +375,10 @@ def _write_tracer_summary(path: Path, report: dict[str, Any]) -> None:
             for url in (item.get("amazon_evidence_urls") or [])
             if str(url).strip() and is_valid_amazon_url(str(url).strip())
         ]
+        if not evidence_urls:
+            best_url = str(item.get("best_evidence_url") or "").strip()
+            if best_url and is_valid_amazon_url(best_url):
+                evidence_urls = [best_url]
         lines.append(
             f"| {item.get('brand_name', '')} | {item.get('canonical_brand_name', '') or 'none'} | {item.get('website_title', '') or 'none'} | {', '.join(evidence_urls) or 'none'} | {item.get('contact_url', '') or 'none'} | {item.get('decision_maker_name', '') or 'none'} | {item.get('draft_preview_subject', '') or 'blocked'} |",
         )
@@ -280,6 +405,12 @@ def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = Tru
         "tracer_preflight_missing_brand_name_count": 0,
         "tracer_preflight_missing_website_count": 0,
         "tracer_preflight_brand_filtered_count": 0,
+        "tracer_preflight_duplicate_rows_skipped": 0,
+        "tracer_preflight_junk_rows_skipped": 0,
+        "tracer_preflight_missing_required_fields_by_row": [],
+        "tracer_preflight_matching_rows_by_brand": {},
+        "tracer_preflight_selected_rows_by_brand": {},
+        "tracer_preflight_final_brands_to_process": [],
         "tracer_contact_paths_found": 0,
         "tracer_decision_makers_found": 0,
         "tracer_drafts_generated": 0,
@@ -307,10 +438,21 @@ def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = Tru
         report.update(preflight_counts)
         _append_text_log(
             tracer_log,
-            "tracer preflight total={tracer_preflight_total_rows} eligible={tracer_preflight_eligible_count} missing_status={tracer_preflight_missing_status_count} missing_brand={tracer_preflight_missing_brand_name_count} missing_website={tracer_preflight_missing_website_count} filtered={tracer_preflight_brand_filtered_count}".format(
+            "tracer preflight total={tracer_preflight_total_rows} eligible={tracer_preflight_eligible_count} missing_status={tracer_preflight_missing_status_count} missing_brand={tracer_preflight_missing_brand_name_count} missing_website={tracer_preflight_missing_website_count} filtered={tracer_preflight_brand_filtered_count} duplicates={tracer_preflight_duplicate_rows_skipped} junk={tracer_preflight_junk_rows_skipped} final={tracer_preflight_final_brands_to_process}".format(
                 **report,
             ),
         )
+        requested_brands = list(report.get("tracer_brands_requested", []))
+        selected_brands = set(report.get("tracer_preflight_final_brands_to_process", []))
+        missing_requested = [brand for brand in requested_brands if brand not in selected_brands]
+        if missing_requested:
+            report["errors"] += 1
+            report["storage_flush_status"] = "skipped_preflight_missing_requested_brands"
+            _write_tracer_summary(tracer_summary, report)
+            write_campaign_report(db_path, summary=report)
+            raise RuntimeError(
+                f"tracer preflight found no selected rows for requested brands: {', '.join(missing_requested)}",
+            )
         if not candidates:
             report["errors"] += 1
             report["storage_flush_status"] = "skipped_preflight_no_candidates"

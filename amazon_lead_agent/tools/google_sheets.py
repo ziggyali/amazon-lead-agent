@@ -17,6 +17,23 @@ SPREADSHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 MAX_CELL_LENGTH = 5000
 MAX_URL_CELL_LENGTH = 1000
 CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+LEAD_QUEUE_REQUIRED_HEADERS = [
+    "lead_id",
+    "brand_name",
+    "canonical_brand_name",
+    "website",
+    "category",
+    "status",
+    "manual_amazon_evidence_url",
+    "manual_amazon_evidence_notes",
+    "best_evidence_url",
+    "best_evidence_type",
+    "best_evidence_confidence",
+    "evidence_last_verified_at",
+    "draft_preview_subject",
+    "draft_preview_body",
+    "send_status",
+]
 
 
 def _new_io_stats() -> dict[str, Any]:
@@ -354,6 +371,39 @@ def _upsert_row(service, sheet_id: str, tab: str, item: dict) -> None:
         insertDataOption="INSERT_ROWS",
         body={"values": [[item.get(header, "") for header in header_row]]},
     ).execute()
+
+
+def _unique_headers(headers: list[str]) -> list[str]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for header in headers:
+        clean = str(header or "").strip()
+        if not clean or clean in seen:
+            continue
+        unique.append(clean)
+        seen.add(clean)
+    return unique
+
+
+def ensure_tab_headers(sheet_id: str, tab: str, required_headers: list[str], auth_mode: str | None = None) -> list[str]:
+    service = _build_service(auth_mode=auth_mode)
+    _ensure_tab_exists(service, sheet_id, tab)
+    values_api = service.spreadsheets().values()
+    existing = values_api.get(spreadsheetId=sheet_id, range=f"{tab}!1:1").execute().get("values", [])
+    existing_headers = _unique_headers([str(header) for header in (existing[0] if existing else [])])
+    required = _unique_headers([str(header) for header in required_headers])
+    merged = list(existing_headers)
+    for header in required:
+        if header not in merged:
+            merged.append(header)
+    if not existing or merged != existing_headers:
+        values_api.update(
+            spreadsheetId=sheet_id,
+            range=f"{tab}!1:1",
+            valueInputOption="RAW",
+            body={"values": [merged]},
+        ).execute()
+    return merged
 
 
 def append_rows(

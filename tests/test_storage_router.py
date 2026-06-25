@@ -86,6 +86,16 @@ class StorageRouterTests(unittest.TestCase):
         self.assertEqual(store.lead_queue_verification_status, "confirmed")
         self.assertEqual(store.storage_flush_status, "ok")
 
+    @patch("amazon_lead_agent.tools.google_sheets.ensure_tab_headers", return_value=["lead_id", "brand_name", "canonical_brand_name", "website", "category", "status"])
+    @patch("amazon_lead_agent.tools.google_sheets.read_tab_rows", return_value=[])
+    def test_sheet_store_repair_creates_missing_lead_queue_headers(self, mock_read_rows, mock_ensure_headers) -> None:
+        store = SheetStore("sheet-123")
+        store.warm_tabs(["Lead Queue"])
+        mock_ensure_headers.assert_called()
+        headers = mock_ensure_headers.call_args.args[2]
+        self.assertIn("status", headers)
+        self.assertIn("canonical_brand_name", headers)
+
     def test_sheet_store_retries_connection_errors(self) -> None:
         store = SheetStore("sheet-123")
         attempts = {"count": 0}
@@ -112,7 +122,7 @@ class StorageRouterTests(unittest.TestCase):
         self.assertEqual(store.lead_queue_rows_failed, 0)
         self.assertEqual(store.lead_queue_verification_status, "skipped_due_to_read_error")
         self.assertEqual(store.storage_flush_status, "ok")
-        self.assertFalse(store.dedupe_cache_unavailable)
+        self.assertTrue(store.dedupe_cache_unavailable)
 
     @patch("amazon_lead_agent.tools.google_sheets.read_tab_headers", return_value=["id", "company_name", "website", "status", "updated_at"])
     @patch("amazon_lead_agent.tools.google_sheets.read_tab_rows", return_value=[])
