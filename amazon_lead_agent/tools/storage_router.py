@@ -173,6 +173,28 @@ class StorageRouter:
 
         return [_row_to_dict(row) for row in rows]
 
+    def read_lead_queue_rows(self, refresh: bool = False) -> list[dict[str, Any]]:
+        if self.uses_sheets:
+            assert self._sheet_store is not None
+            return self._sheet_store.read_lead_queue_rows(refresh=refresh)
+        if not self._sqlite_conn:
+            return []
+        cursor = self._sqlite_conn.execute("SELECT * FROM leads")
+        rows = cursor.fetchall()
+        from amazon_lead_agent.tools.sqlite_store import _row_to_dict  # local import to avoid cycle
+
+        return [_row_to_dict(row) for row in rows]
+
+    def replace_lead_row(self, lead: dict[str, Any], tab: str | None = None) -> str:
+        stage_tab = tab or self._stage_tab(lead)
+        lead_id = str(lead.get("id") or lead.get("lead_id") or "")
+        if self.uses_sheets:
+            assert self._sheet_store is not None
+            lead_id = self._sheet_store.write_lead_in_place(lead, stage_tab) or lead_id
+        if self.uses_sqlite:
+            lead_id = self._upsert_sqlite(lead)
+        return lead_id
+
     def upsert_lead(self, lead: dict[str, Any], tab: str | None = None) -> str:
         lead, missing = validate_lead_identity_for_storage(lead)
         if missing:

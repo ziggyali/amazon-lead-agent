@@ -439,8 +439,8 @@ def append_rows(
     return {"confirmed_rows": confirmed_rows, "response": response, "headers": tab_headers}
 
 
-def append_or_update_lead(sheet_id: str, tab: str, lead: dict) -> None:
-    service = _build_service()
+def append_or_update_lead(sheet_id: str, tab: str, lead: dict, auth_mode: str | None = None) -> None:
+    service = _build_service(auth_mode=auth_mode)
     _upsert_row(service, sheet_id, tab, lead)
 
 

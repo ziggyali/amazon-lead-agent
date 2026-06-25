@@ -48,6 +48,9 @@ class TracerModeTests(unittest.TestCase):
             def get_all_leads(self):
                 return self.get_leads_for_enrichment(999)
 
+            def read_lead_queue_rows(self, refresh=False):
+                return self.get_leads_for_enrichment(999)
+
             def upsert_lead(self, lead, tab=None):
                 self.upserts.append((tab, dict(lead)))
                 return lead.get("id", "lead-1")
@@ -174,6 +177,9 @@ class TracerModeTests(unittest.TestCase):
             def get_all_leads(self):
                 return self.get_leads_for_enrichment(999)
 
+            def read_lead_queue_rows(self, refresh=False):
+                return self.get_leads_for_enrichment(999)
+
             def upsert_lead(self, lead, tab=None):
                 self.upserts.append((tab, dict(lead)))
                 return lead.get("id", "lead-1")
@@ -296,6 +302,9 @@ class TracerModeTests(unittest.TestCase):
             def get_leads_for_enrichment(self, limit):
                 return self.get_all_leads()[:limit]
 
+            def read_lead_queue_rows(self, refresh=False):
+                return self.get_all_leads()
+
             def upsert_lead(self, lead, tab=None):
                 self.upserts.append((tab, dict(lead)))
                 return lead.get("id", "lead-1")
@@ -385,7 +394,7 @@ class TracerModeTests(unittest.TestCase):
         self.assertEqual(report["tracer_drafts_generated"], 2)
         self.assertGreaterEqual(report["tracer_preflight_duplicate_rows_skipped"], 1)
         self.assertGreaterEqual(report["tracer_preflight_junk_rows_skipped"], 1)
-        self.assertEqual(report["tracer_preflight_final_brands_to_process"], ["glossier", "tatcha"])
+        self.assertCountEqual(report["tracer_preflight_final_brands_to_process"], ["glossier", "tatcha"])
         self.assertEqual(report["tracer_preflight_selected_rows_by_brand"]["glossier"], ["lead-2"])
 
     @patch("amazon_lead_agent.runtime.get_storage_router")
@@ -421,6 +430,9 @@ class TracerModeTests(unittest.TestCase):
                     },
                 ]
 
+            def read_lead_queue_rows(self, refresh=False):
+                return self.get_all_leads()
+
             def get_leads_for_enrichment(self, limit):
                 return []
 
@@ -445,17 +457,70 @@ class TracerModeTests(unittest.TestCase):
             old_cwd = os.getcwd()
             os.chdir(tmpdir)
             try:
-                with self.assertRaisesRegex(RuntimeError, "missing_status=1"):
+                report = run_campaign(
+                    {
+                        "storage": {"google_sheet_id": "sheet-123"},
+                        "campaign": {"minimum_score_for_draft": 75, "daily_draft_limit": 10, "daily_discovery_limit": 8, "categories": ["beauty", "pet"]},
+                        "sender": {"name": "Zaigham Ali", "offer": "Offer"},
+                        "llm": {"provider": "minimax"},
+                    },
+                    cwd / "leads.db",
+                    mode="tracer",
+                    dry_run=True,
+                )
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertEqual(report["tracer_preflight_missing_status_count"], 1)
+        self.assertEqual(report["tracer_preflight_missing_brand_name_count"], 0)
+        self.assertEqual(report["tracer_preflight_missing_website_count"], 1)
+        self.assertEqual(report["tracer_preflight_raw_rows_read_count"], 3)
+        self.assertEqual(report["tracer_preflight_read_source"], "lead_queue_direct")
+
+    @patch("amazon_lead_agent.runtime.get_storage_router")
+    def test_tracer_preflight_empty_sheet_reports_sheet_read_failed(self, mock_get_storage_router) -> None:
+        class FakeStorage:
+            uses_sheets = True
+
+            def read_lead_queue_rows(self, refresh=False):
+                return []
+
+            def get_all_leads(self):
+                raise AssertionError("tracer preflight should not read all tabs")
+
+            def upsert_lead(self, lead, tab=None):
+                return lead.get("id", "")
+
+            def record_outreach_event(self, event):
+                return None
+
+            def append_daily_report(self, report):
+                return None
+
+            def commit(self):
+                return None
+
+            def close(self):
+                return None
+
+        mock_get_storage_router.return_value = FakeStorage()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cwd = Path(tmpdir)
+            old_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "sheet_read_failed"):
                     run_campaign(
                         {
                             "storage": {"google_sheet_id": "sheet-123"},
-                            "campaign": {"minimum_score_for_draft": 75, "daily_draft_limit": 10, "daily_discovery_limit": 8, "categories": ["beauty", "pet"]},
+                            "campaign": {"minimum_score_for_draft": 75, "daily_draft_limit": 10, "daily_discovery_limit": 8, "categories": ["beauty"]},
                             "sender": {"name": "Zaigham Ali", "offer": "Offer"},
                             "llm": {"provider": "minimax"},
                         },
                         cwd / "leads.db",
                         mode="tracer",
                         dry_run=True,
+                        brands="Glossier,Tatcha",
                     )
             finally:
                 os.chdir(old_cwd)
@@ -520,6 +585,9 @@ class TracerModeTests(unittest.TestCase):
                     "status": "needs_enrichment",
                     "source_urls": ["https://www.tatcha.com"],
                 }]
+
+            def read_lead_queue_rows(self, refresh=False):
+                return self.get_leads_for_enrichment(999)
 
             def get_all_leads(self):
                 return self.get_leads_for_enrichment(999)
@@ -629,6 +697,9 @@ class TracerModeTests(unittest.TestCase):
                     "status": "needs_enrichment",
                     "source_urls": ["https://www.glossier.com"],
                 }]
+
+            def read_lead_queue_rows(self, refresh=False):
+                return self.get_leads_for_enrichment(999)
 
             def get_all_leads(self):
                 return self.get_leads_for_enrichment(999)

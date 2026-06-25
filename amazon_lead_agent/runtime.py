@@ -16,6 +16,7 @@ from amazon_lead_agent.reporting import write_campaign_report
 from amazon_lead_agent.lead_filters import is_junk_company_name
 from amazon_lead_agent.tools.amazon_backlink_discovery import is_valid_amazon_url
 from amazon_lead_agent.tools.amazon_evidence_verification import STRUCTURED_EVIDENCE_TYPES, verify_amazon_evidence
+from amazon_lead_agent.tools import google_sheets
 from amazon_lead_agent.tools.scrapegraph_runner import extract_brand_profile
 from amazon_lead_agent.tools.storage_router import get_storage_router
 from amazon_lead_agent.normalization import ensure_lead_identity, infer_brand_name_from_domain, normalize_company_name
@@ -128,6 +129,13 @@ def _lead_brand_display_name(lead: dict[str, Any]) -> str:
         if inferred and not is_junk_company_name(inferred):
             return inferred
     return ""
+
+
+def _lead_root_domain(lead: dict[str, Any]) -> str:
+    website = str(lead.get("website") or lead.get("primary_source_url") or "").strip()
+    if not website:
+        return ""
+    return normalize_company_name(infer_brand_name_from_domain(website))
 
 
 def _tracer_row_priority(lead: dict[str, Any]) -> tuple[int, int, int, int, int, str]:
@@ -255,17 +263,30 @@ def _append_text_log(path: Path, message: str) -> None:
         handle.write(f"[{timestamp}] {message}\n")
 
 
-def _tracer_preflight(storage: Any, brands: Any = None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    requested = _normalize_brand_targets(brands)
-    requested_set = set(requested)
-    leads = []
-    if hasattr(storage, "get_all_leads"):
-        try:
-            leads = list(storage.get_all_leads())
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"tracer preflight could not read Lead Queue rows: {exc}") from exc
+def _read_tracer_lead_queue_rows(storage: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    before_stats = google_sheets.get_io_stats()
+    read_source = "lead_queue_direct"
+    try:
+        if hasattr(storage, "read_lead_queue_rows"):
+            rows = list(storage.read_lead_queue_rows(refresh=True))
+        elif hasattr(storage, "_sheet_store") and getattr(storage, "_sheet_store") is not None and hasattr(storage._sheet_store, "read_lead_queue_rows"):
+            rows = list(storage._sheet_store.read_lead_queue_rows(refresh=True))
+        else:
+            raise RuntimeError("Lead Queue direct read is unavailable")
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"sheet_read_failed: {exc}") from exc
+    after_stats = google_sheets.get_io_stats()
+    read_errors = len(after_stats.get("failed_sheet_reads", [])) - len(before_stats.get("failed_sheet_reads", []))
+    if not rows:
+        raise RuntimeError("sheet_read_failed: Lead Queue read returned no rows")
+    if read_errors > 0 and not rows:
+        raise RuntimeError("sheet_read_failed: Lead Queue read returned no rows after retry")
+    return rows, {"read_source": read_source, "sheet_read_error_count": max(0, read_errors)}
+
+
+def _select_tracer_rows(rows: list[dict[str, Any]], requested_set: set[str]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     counts = {
-        "tracer_preflight_total_rows": len(leads),
+        "tracer_preflight_raw_rows_read_count": len(rows),
         "tracer_preflight_eligible_count": 0,
         "tracer_preflight_missing_status_count": 0,
         "tracer_preflight_missing_brand_name_count": 0,
@@ -277,34 +298,29 @@ def _tracer_preflight(storage: Any, brands: Any = None) -> tuple[dict[str, Any],
         "tracer_preflight_matching_rows_by_brand": {},
         "tracer_preflight_selected_rows_by_brand": {},
         "tracer_preflight_final_brands_to_process": [],
+        "tracer_preflight_missing_requested_brands": [],
     }
     matching: dict[str, list[dict[str, Any]]] = {}
+    matched_rows_by_brand: dict[str, list[str]] = {}
     missing_required_fields_by_row: list[dict[str, Any]] = []
-    for lead in leads:
-        junk_values = [
-            value
-            for value in (lead.get("brand_name"), lead.get("canonical_brand_name"), lead.get("company_name"), lead.get("seed_label"))
-            if str(value or "").strip()
-        ]
+    for raw in rows:
+        lead = ensure_lead_identity(raw)
+        junk_values = [value for value in (lead.get("brand_name"), lead.get("canonical_brand_name"), lead.get("company_name"), lead.get("seed_label")) if str(value or "").strip()]
         if any(_looks_like_stale_junk_brand(value) for value in junk_values):
             counts["tracer_preflight_junk_rows_skipped"] += 1
-            continue
-        display_name = _lead_brand_display_name(lead)
-        brand_key = _lead_brand_target_key(lead)
-        if requested_set and brand_key not in requested_set:
-            counts["tracer_preflight_brand_filtered_count"] += 1
             continue
         status = str(lead.get("status") or "").strip()
         brand_name = str(lead.get("canonical_brand_name") or lead.get("brand_name") or lead.get("company_name") or "").strip()
         website = str(lead.get("website") or "").strip()
         missing_fields = [field for field, value in (("status", status), ("brand_name", brand_name), ("website", website)) if not value]
         if missing_fields:
-            row_issue = {
-                "lead_id": lead.get("lead_id") or lead.get("id") or "",
-                "canonical_brand_name": display_name or brand_name,
-                "missing_fields": missing_fields,
-            }
-            missing_required_fields_by_row.append(row_issue)
+            missing_required_fields_by_row.append(
+                {
+                    "lead_id": lead.get("lead_id") or lead.get("id") or "",
+                    "canonical_brand_name": _lead_brand_display_name(lead) or brand_name,
+                    "missing_fields": missing_fields,
+                },
+            )
             if "status" in missing_fields:
                 counts["tracer_preflight_missing_status_count"] += 1
             if "brand_name" in missing_fields:
@@ -314,26 +330,87 @@ def _tracer_preflight(storage: Any, brands: Any = None) -> tuple[dict[str, Any],
             continue
         if status.lower() not in {"new", "discovered", "needs_enrichment", "extraction_error"}:
             continue
-        final_brand = brand_key or normalize_company_name(display_name or brand_name)
-        if not final_brand:
-            counts["tracer_preflight_junk_rows_skipped"] += 1
+        brand_candidates = []
+        for candidate in _lead_brand_normalized_values(lead):
+            if candidate and candidate not in brand_candidates:
+                brand_candidates.append(candidate)
+        matched_brands = [brand for brand in brand_candidates if not requested_set or brand in requested_set]
+        if not matched_brands and requested_set:
+            inferred = _lead_root_domain(lead)
+            if inferred and inferred in requested_set:
+                matched_brands = [inferred]
+        if not matched_brands:
+            counts["tracer_preflight_brand_filtered_count"] += 1
             continue
-        matching.setdefault(final_brand, []).append(lead)
+        for brand in matched_brands:
+            matching.setdefault(brand, []).append(lead)
+            matched_rows_by_brand.setdefault(brand, []).append(str(lead.get("lead_id") or lead.get("id") or ""))
     selected: list[dict[str, Any]] = []
     selected_by_brand: dict[str, list[str]] = {}
-    matching_by_brand: dict[str, list[str]] = {brand: [str(row.get("lead_id") or row.get("id") or "") for row in rows] for brand, rows in matching.items()}
-    for brand, rows in matching.items():
-        active = list(rows)
-        active.sort(key=_tracer_row_priority, reverse=True)
+    missing_requested: list[str] = []
+    for brand in (list(requested_set) if requested_set else sorted(matching.keys())):
+        rows_for_brand = matching.get(brand, [])
+        if not rows_for_brand:
+            missing_requested.append(brand)
+            continue
+        active = sorted(rows_for_brand, key=_tracer_row_priority, reverse=True)
         if active:
             selected.append(active[0])
             selected_by_brand[brand] = [str(active[0].get("lead_id") or active[0].get("id") or "")]
             counts["tracer_preflight_duplicate_rows_skipped"] += max(0, len(active) - 1)
     counts["tracer_preflight_eligible_count"] = len(selected)
     counts["tracer_preflight_missing_required_fields_by_row"] = missing_required_fields_by_row
-    counts["tracer_preflight_matching_rows_by_brand"] = matching_by_brand
+    counts["tracer_preflight_matching_rows_by_brand"] = matched_rows_by_brand
     counts["tracer_preflight_selected_rows_by_brand"] = selected_by_brand
     counts["tracer_preflight_final_brands_to_process"] = list(selected_by_brand.keys())
+    counts["tracer_preflight_missing_requested_brands"] = missing_requested
+    return counts, selected
+
+
+def _tracer_preflight(storage: Any, brands: Any = None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    requested = _normalize_brand_targets(brands)
+    requested_set = set(requested)
+    counts = {
+        "tracer_preflight_total_rows": 0,
+        "tracer_preflight_raw_rows_read_count": 0,
+        "tracer_preflight_eligible_count": 0,
+        "tracer_preflight_missing_status_count": 0,
+        "tracer_preflight_missing_brand_name_count": 0,
+        "tracer_preflight_missing_website_count": 0,
+        "tracer_preflight_brand_filtered_count": 0,
+        "tracer_preflight_duplicate_rows_skipped": 0,
+        "tracer_preflight_junk_rows_skipped": 0,
+        "tracer_preflight_missing_required_fields_by_row": [],
+        "tracer_preflight_matching_rows_by_brand": {},
+        "tracer_preflight_selected_rows_by_brand": {},
+        "tracer_preflight_final_brands_to_process": [],
+        "tracer_preflight_missing_requested_brands": [],
+        "tracer_preflight_read_source": "lead_queue_direct",
+        "tracer_preflight_sheet_read_error_count": 0,
+        "tracer_preflight_error": "",
+    }
+    direct_rows, read_meta = _read_tracer_lead_queue_rows(storage)
+    counts["tracer_preflight_total_rows"] = len(direct_rows)
+    counts["tracer_preflight_raw_rows_read_count"] = len(direct_rows)
+    counts["tracer_preflight_sheet_read_error_count"] = read_meta.get("sheet_read_error_count", 0)
+    counts["tracer_preflight_read_source"] = read_meta.get("read_source", "lead_queue_direct")
+    selected_counts, selected = _select_tracer_rows(direct_rows, requested_set)
+    counts.update(selected_counts)
+    if requested_set and counts["tracer_preflight_missing_requested_brands"]:
+        retry_rows, retry_meta = _read_tracer_lead_queue_rows(storage)
+        retry_counts, retry_selected = _select_tracer_rows(retry_rows, requested_set)
+        counts["tracer_preflight_total_rows"] = len(retry_rows)
+        counts["tracer_preflight_raw_rows_read_count"] = len(retry_rows)
+        counts["tracer_preflight_sheet_read_error_count"] = retry_meta.get("sheet_read_error_count", counts["tracer_preflight_sheet_read_error_count"])
+        counts["tracer_preflight_read_source"] = f"{retry_meta.get('read_source', 'lead_queue_direct')}:retry"
+        counts.update(retry_counts)
+        selected = retry_selected
+    if counts["tracer_preflight_sheet_read_error_count"] > 0 and not counts["tracer_preflight_raw_rows_read_count"]:
+        counts["tracer_preflight_error"] = "sheet_read_failed"
+        return counts, []
+    if requested_set and counts["tracer_preflight_missing_requested_brands"]:
+        counts["tracer_preflight_error"] = "missing_requested_brands: " + ", ".join(sorted(counts["tracer_preflight_missing_requested_brands"]))
+        return counts, selected
     return counts, selected
 
 
@@ -445,6 +522,13 @@ def run_tracer_bullet(config: dict[str, Any], db_path: Path, dry_run: bool = Tru
         requested_brands = list(report.get("tracer_brands_requested", []))
         selected_brands = set(report.get("tracer_preflight_final_brands_to_process", []))
         missing_requested = [brand for brand in requested_brands if brand not in selected_brands]
+        preflight_error = str(report.get("tracer_preflight_error") or "").strip()
+        if preflight_error:
+            report["errors"] += 1
+            report["storage_flush_status"] = "skipped_preflight_read_failed" if preflight_error == "sheet_read_failed" else "skipped_preflight_missing_requested_brands"
+            _write_tracer_summary(tracer_summary, report)
+            write_campaign_report(db_path, summary=report)
+            raise RuntimeError(preflight_error)
         if missing_requested:
             report["errors"] += 1
             report["storage_flush_status"] = "skipped_preflight_missing_requested_brands"

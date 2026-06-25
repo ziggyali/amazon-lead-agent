@@ -78,6 +78,9 @@ class LeadQueueMigrationTests(unittest.TestCase):
             def get_all_leads(self):
                 return list(self.rows)
 
+            def read_lead_queue_rows(self, refresh=False):
+                return list(self.rows)
+
             def upsert_lead(self, lead, tab=None):
                 self.upserts.append((tab, dict(lead)))
                 return lead.get("lead_id", "")
@@ -96,6 +99,51 @@ class LeadQueueMigrationTests(unittest.TestCase):
         self.assertTrue(repaired["website"])
         self.assertEqual(storage.commits, 1)
 
+    def test_migrate_lead_queue_rows_updates_existing_row_in_place(self) -> None:
+        class FakeStorage:
+            def __init__(self):
+                self.rows = [
+                    {
+                        "lead_id": "lead-1",
+                        "brand_name": "glossier com",
+                        "company_name": "glossier com",
+                        "website": "",
+                        "status": "",
+                        "category": "beauty",
+                    }
+                ]
+                self.replacements = []
+                self.upserts = []
+                self.commits = 0
+
+            def read_lead_queue_rows(self, refresh=False):
+                return list(self.rows)
+
+            def replace_lead_row(self, lead, tab=None):
+                self.replacements.append((tab, dict(lead)))
+                self.rows[0] = dict(lead)
+                return lead.get("lead_id", "")
+
+            def upsert_lead(self, lead, tab=None):
+                self.upserts.append((tab, dict(lead)))
+                raise AssertionError("migration should update existing Lead Queue rows in place")
+
+            def commit(self):
+                self.commits += 1
+
+        storage = FakeStorage()
+        summary = migrate_lead_queue_rows(storage, dry_run=False)
+        self.assertEqual(summary.rows_seen, 1)
+        self.assertEqual(summary.rows_changed, 1)
+        self.assertEqual(len(storage.replacements), 1)
+        self.assertEqual(len(storage.upserts), 0)
+        repaired = storage.replacements[0][1]
+        self.assertEqual(storage.replacements[0][0], "Lead Queue")
+        self.assertEqual(repaired["canonical_brand_name"], "Glossier")
+        self.assertNotEqual(repaired["canonical_brand_name"], "Lead Queue")
+        self.assertEqual(len(storage.rows), 1)
+        self.assertEqual(storage.commits, 1)
+
     def test_migrate_lead_queue_rows_repairs_in_memory_rows(self) -> None:
         class FakeStorage:
             def __init__(self):
@@ -112,6 +160,9 @@ class LeadQueueMigrationTests(unittest.TestCase):
                 self.commits = 0
 
             def get_all_leads(self):
+                return list(self.rows)
+
+            def read_lead_queue_rows(self, refresh=False):
                 return list(self.rows)
 
             def upsert_lead(self, lead, tab=None):

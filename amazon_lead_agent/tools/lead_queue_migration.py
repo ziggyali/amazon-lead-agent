@@ -202,7 +202,12 @@ def _migration_signature(row: dict[str, Any]) -> tuple[str, str, str, str, str]:
 
 def migrate_lead_queue_rows(storage: Any, dry_run: bool = True, delete_junk: bool = False) -> MigrationSummary:
     summary = MigrationSummary()
-    rows = list(storage.get_all_leads() if hasattr(storage, "get_all_leads") else [])
+    if hasattr(storage, "read_lead_queue_rows"):
+        rows = list(storage.read_lead_queue_rows(refresh=True))
+    elif hasattr(storage, "get_all_leads"):
+        rows = list(storage.get_all_leads())
+    else:
+        rows = []
     repaired_rows: list[dict[str, Any]] = []
     for row in rows:
         summary.rows_seen += 1
@@ -261,7 +266,10 @@ def migrate_lead_queue_rows(storage: Any, dry_run: bool = True, delete_junk: boo
             }
         )
         if not dry_run:
-            storage.upsert_lead(repaired, tab="Lead Queue")
+            if hasattr(storage, "replace_lead_row"):
+                storage.replace_lead_row(repaired, tab="Lead Queue")
+            else:
+                storage.upsert_lead(repaired, tab="Lead Queue")
     if not dry_run and summary.rows_changed:
         storage.commit()
     return summary

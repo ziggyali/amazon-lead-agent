@@ -87,6 +87,18 @@ class SheetStore:
             self._index_row(tab, row)
         return [dict(row) for row in rows]
 
+    def read_lead_queue_rows(self, refresh: bool = False) -> list[dict[str, Any]]:
+        tab = "Lead Queue"
+        if not refresh and tab in self._tab_cache:
+            return [dict(row) for row in self._tab_cache[tab]]
+        rows = google_sheets.read_tab_rows(self.sheet_id, tab, auth_mode=self.auth_mode)
+        self._tab_cache[tab] = [dict(row) for row in rows]
+        if rows:
+            self._headers_cache[tab] = list(rows[0].keys())
+        for row in rows:
+            self._index_row(tab, row)
+        return [dict(row) for row in rows]
+
     def _load_lead_queue_cache(self) -> None:
         if self._lead_cache_loaded:
             return
@@ -166,6 +178,24 @@ class SheetStore:
     def _pending_rows_for_tab(self, tab: str) -> list[dict[str, Any]]:
         pending = self._pending_leads.get(tab, {})
         return [dict(row) for row in pending.values()]
+
+    def write_lead_in_place(self, lead: dict[str, Any], tab: str = "Lead Queue") -> str:
+        canonical = _canonical_tab_name(tab)
+        payload, missing = validate_lead_identity_for_storage(lead)
+        if missing:
+            raise ValueError(f"missing required lead fields: {', '.join(missing)}")
+        if not payload.get("id"):
+            company_name = payload.get("company_name") or payload.get("brand_name") or payload.get("website") or ""
+            website = payload.get("website") or ""
+            source = (payload.get("source_urls") or [payload.get("primary_source_url") or website or ""])[0]
+            payload["id"] = make_lead_id(str(company_name), str(website), str(source))
+        if not payload.get("lead_id"):
+            payload["lead_id"] = payload.get("id")
+        if not payload.get("updated_at"):
+            payload["updated_at"] = _utc_now()
+        google_sheets.append_or_update_lead(self.sheet_id, canonical, payload, auth_mode=self.auth_mode)
+        self._remember_row(canonical, payload)
+        return str(payload.get("id") or "")
 
     def get_all_leads(self) -> list[dict[str, Any]]:
         merged: dict[str, dict[str, Any]] = {}
